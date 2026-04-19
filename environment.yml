@@ -1,0 +1,14 @@
+name: wifi-csi
+channels:
+  - defaults
+dependencies:
+  - python=3.11
+  - numpy
+  - pandas
+  - matplotlib
+  - scipy
+  - pip:
+    - rich
+    - pyserial
+    - plotly
+    - dash
