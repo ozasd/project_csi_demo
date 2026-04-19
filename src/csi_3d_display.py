@@ -42,11 +42,41 @@ STATIC_HTML_NAME = "csi_scene_delta.html"
 STATIC_JSON_NAME = "csi_scene_delta.json"
 DEFAULT_LOG_STEM = "csi_runtime_log"
 
-DEFAULT_FIGURE_HEIGHT = 780
+DEFAULT_FIGURE_HEIGHT = 880
 DEFAULT_CLOUD_Z_MAX = 1.10
 DEFAULT_PROFILE_Y_MAX = 1.10
 DEFAULT_DELTA_Y_MAX = 0.28
 DEFAULT_SPECTROGRAM_Z_MAX = 0.32
+
+# ── 共用 subplot / layout 配置 ──────────────────────────────────
+SUBPLOT_SPECS = [
+    [{"type": "scene", "rowspan": 2}, {"type": "xy", "secondary_y": True}],
+    [None, {"type": "heatmap"}],
+]
+SUBPLOT_COLUMN_WIDTHS = [0.55, 0.45]
+SUBPLOT_ROW_HEIGHTS = [0.48, 0.52]
+SUBPLOT_H_SPACING = 0.05
+SUBPLOT_V_SPACING = 0.09
+
+LAYOUT_COMMON = dict(
+    paper_bgcolor="#08111f",
+    plot_bgcolor="#08111f",
+    font=dict(family="Microsoft JhengHei, sans-serif", color="#dbe7f3"),
+    margin=dict(l=28, r=28, t=100, b=56),
+    uirevision="csi-layout-static",
+)
+
+LEGEND_COMMON = dict(
+    orientation="h",
+    yanchor="bottom",
+    y=1.06,
+    xanchor="center",
+    x=0.5,
+    bgcolor="rgba(8,17,31,0.72)",
+    bordercolor="#203247",
+    borderwidth=1,
+    font=dict(size=11),
+)
 
 BASE_COLORSCALE = [
     [0.0, "#0d1b2a"],
@@ -269,29 +299,27 @@ def _estimate_targets(
     return cloud_target, profile_target, delta_target, spectrogram_target
 
 
-def _empty_figure(message: str, scales: DisplayScales) -> go.Figure:
-    """建立資料不足時的佔位圖。"""
-    fig = make_subplots(
+def _make_subplot_figure(titles: tuple[str, ...]) -> go.Figure:
+    """建立共用 subplot 骨架。"""
+    return make_subplots(
         rows=2,
         cols=2,
-        specs=[
-            [{"type": "scene", "rowspan": 2}, {"type": "xy", "secondary_y": True}],
-            [None, {"type": "heatmap"}],
-        ],
-        column_widths=[0.62, 0.38],
-        row_heights=[0.46, 0.54],
-        horizontal_spacing=0.06,
-        vertical_spacing=0.10,
-        subplot_titles=("3D 差分雲霧圖", "子載波變化圖", "STFT Spectrogram"),
+        specs=SUBPLOT_SPECS,
+        column_widths=SUBPLOT_COLUMN_WIDTHS,
+        row_heights=SUBPLOT_ROW_HEIGHTS,
+        horizontal_spacing=SUBPLOT_H_SPACING,
+        vertical_spacing=SUBPLOT_V_SPACING,
+        subplot_titles=titles,
     )
+
+
+def _empty_figure(message: str, scales: DisplayScales) -> go.Figure:
+    """建立資料不足時的佔位圖。"""
+    fig = _make_subplot_figure(("3D 差分雲霧圖", "子載波變化圖", "STFT Spectrogram"))
     fig.update_layout(
-        paper_bgcolor="#08111f",
-        plot_bgcolor="#08111f",
-        font=dict(family="Microsoft JhengHei, sans-serif", color="#dbe7f3"),
+        **LAYOUT_COMMON,
         height=scales.figure_height,
-        margin=dict(l=18, r=18, t=86, b=20),
         title=dict(text=message, x=0.5, xanchor="center"),
-        uirevision="csi-layout-static",
     )
     fig.add_annotation(
         text="等待 CSI 幀資料...",
@@ -378,8 +406,8 @@ def _add_cloud_panel(
                     bgcolor="rgba(8,17,31,0.84)",
                     bordercolor="#203247",
                     borderwidth=1,
-                    len=0.60,
-                    x=0.59,
+                    len=0.55,
+                    x=0.52,
                 ),
             ),
             hovertemplate=(
@@ -580,19 +608,7 @@ def build_figure(
     spectrogram_result = _compute_spectrogram(time_axis, amplitude_matrix, snapshot)
     status_text, status_color = _build_status(snapshot, detector)
 
-    fig = make_subplots(
-        rows=2,
-        cols=2,
-        specs=[
-            [{"type": "scene", "rowspan": 2}, {"type": "xy", "secondary_y": True}],
-            [None, {"type": "heatmap"}],
-        ],
-        column_widths=[0.62, 0.38],
-        row_heights=[0.46, 0.54],
-        horizontal_spacing=0.06,
-        vertical_spacing=0.10,
-        subplot_titles=("3D 差分雲霧圖", "子載波變化圖", "STFT Spectrogram"),
-    )
+    fig = _make_subplot_figure(("3D 差分雲霧圖", "子載波變化圖", "STFT Spectrogram"))
 
     _add_cloud_panel(
         fig,
@@ -617,36 +633,19 @@ def build_figure(
 
     max_time = max(2.0, float(time_axis.max()))
     fig.update_layout(
-        paper_bgcolor="#08111f",
-        plot_bgcolor="#08111f",
-        font=dict(family="Microsoft JhengHei, sans-serif", color="#dbe7f3"),
+        **LAYOUT_COMMON,
         height=scales.figure_height,
-        margin=dict(l=18, r=18, t=90, b=20),
         title=dict(
-            text=(
-                "<b>ESP32 CSI 空間差分視覺化</b>"
-                f"<br><span style='color:{status_color};font-size:15px'>{status_text}</span>"
-            ),
             x=0.5,
             xanchor="center",
         ),
-        legend=dict(
-            orientation="h",
-            yanchor="bottom",
-            y=1.02,
-            xanchor="center",
-            x=0.5,
-            bgcolor="rgba(8,17,31,0.72)",
-            bordercolor="#203247",
-            borderwidth=1,
-        ),
-        uirevision="csi-layout-static",
+        legend=LEGEND_COMMON,
     )
     fig.add_annotation(
         text=metric_text,
         showarrow=False,
         x=0.5,
-        y=-0.03,
+        y=-0.06,
         xref="paper",
         yref="paper",
         xanchor="center",
@@ -730,27 +729,11 @@ def build_figure(
 
 def build_empty_sti_figure(message: str, scales: DisplayScales) -> go.Figure:
     """Build an empty placeholder figure that matches the STI layout."""
-    fig = make_subplots(
-        rows=2,
-        cols=2,
-        specs=[
-            [{"type": "scene", "rowspan": 2}, {"type": "xy", "secondary_y": True}],
-            [None, {"type": "heatmap"}],
-        ],
-        column_widths=[0.62, 0.38],
-        row_heights=[0.46, 0.54],
-        horizontal_spacing=0.06,
-        vertical_spacing=0.10,
-        subplot_titles=("3D CSI Point Cloud", "Subcarrier Profile", "STI Heatmap"),
-    )
+    fig = _make_subplot_figure(("3D CSI Point Cloud", "Subcarrier Profile", "STI Heatmap"))
     fig.update_layout(
-        paper_bgcolor="#08111f",
-        plot_bgcolor="#08111f",
-        font=dict(family="Microsoft JhengHei, sans-serif", color="#dbe7f3"),
+        **LAYOUT_COMMON,
         height=scales.figure_height,
-        margin=dict(l=18, r=18, t=72, b=34),
         title=dict(text=message, x=0.5, xanchor="center"),
-        uirevision="csi-layout-static",
     )
     fig.add_annotation(
         text="Waiting for CSI frames...",
@@ -799,19 +782,7 @@ def build_sti_figure(
     display_matrix, color_title, color_scale = _compute_display_matrix(amplitude_matrix, snapshot)
     sti_matrix = _compute_sti_matrix(display_matrix)
 
-    fig = make_subplots(
-        rows=2,
-        cols=2,
-        specs=[
-            [{"type": "scene", "rowspan": 2}, {"type": "xy", "secondary_y": True}],
-            [None, {"type": "heatmap"}],
-        ],
-        column_widths=[0.62, 0.38],
-        row_heights=[0.46, 0.54],
-        horizontal_spacing=0.06,
-        vertical_spacing=0.10,
-        subplot_titles=("3D CSI Point Cloud", "Subcarrier Profile", "STI Heatmap"),
-    )
+    fig = _make_subplot_figure(("3D CSI Point Cloud", "Subcarrier Profile", "STI Heatmap"))
 
     _add_cloud_panel(
         fig,
@@ -827,38 +798,29 @@ def build_sti_figure(
     _add_sti_heatmap_panel(fig, time_axis, sti_matrix, color_title, color_scale, scales)
 
     latest_frame = frames[-1]
+    status_text, status_color = _build_status(snapshot, detector)
     metric_text = (
         f"RSSI {latest_frame.rssi_dbm:.0f} dBm | "
-        f"Motion energy {snapshot.motion_energy:.3f} | "
-        f"Foreground {snapshot.foreground_ratio:.0%} | "
-        f"Peak delta {snapshot.peak_delta:.3f}"
+        f"差分均值 {snapshot.motion_energy:.3f} | "
+        f"輪廓覆蓋 {snapshot.foreground_ratio:.0%} | "
+        f"最大差分 {snapshot.peak_delta:.3f}"
     )
 
     max_time = max(2.0, float(time_axis.max()))
     fig.update_layout(
-        paper_bgcolor="#08111f",
-        plot_bgcolor="#08111f",
-        font=dict(family="Microsoft JhengHei, sans-serif", color="#dbe7f3"),
+        **LAYOUT_COMMON,
         height=scales.figure_height,
-        margin=dict(l=18, r=18, t=72, b=34),
-        title=dict(text=f"<b>{APP_TITLE}</b>", x=0.5, xanchor="center"),
-        legend=dict(
-            orientation="h",
-            yanchor="bottom",
-            y=1.01,
-            xanchor="center",
+        title=dict(
             x=0.5,
-            bgcolor="rgba(8,17,31,0.72)",
-            bordercolor="#203247",
-            borderwidth=1,
+            xanchor="center",
         ),
-        uirevision="csi-layout-static",
+        legend=LEGEND_COMMON,
     )
     fig.add_annotation(
         text=metric_text,
         showarrow=False,
         x=0.5,
-        y=-0.05,
+        y=-0.06,
         xref="paper",
         yref="paper",
         xanchor="center",
@@ -1028,6 +990,7 @@ class CSI3DDisplay:
 <html lang="zh-Hant">
     <head>
         {%metas%}
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>{%title%}</title>
         {%favicon%}
         {%css%}
@@ -1036,12 +999,18 @@ class CSI3DDisplay:
                 margin: 0;
                 padding: 0;
                 width: 100%;
-                height: 100%;
+                min-height: 100dvh;
                 background: #08111f;
                 color: #dbe7f3;
             }
             * {
                 box-sizing: border-box;
+            }
+            @media (min-width: 1025px) {
+                body { overflow: auto; }
+            }
+            @media (max-width: 1024px) {
+                body { overflow-y: auto; }
             }
         </style>
     </head>
@@ -1090,7 +1059,8 @@ class CSI3DDisplay:
                 dcc.Graph(
                     id="csi-figure",
                     style={
-                        "height": "calc(100vh - 96px)",
+                        "flex": "1 1 auto",
+                        "minHeight": "680px",
                         "width": "100%",
                         "margin": "0",
                         "padding": "0",
@@ -1199,6 +1169,7 @@ class CSI3DDisplay:
 <html lang="zh-Hant">
 <head>
     <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta http-equiv="refresh" content="{refresh_seconds}">
     <title>ESP32 CSI 三圖視覺化</title>
     <style>
@@ -1206,7 +1177,7 @@ class CSI3DDisplay:
             margin: 0;
             padding: 0;
             width: 100%;
-            height: 100%;
+            min-height: 100vh;
             background: #08111f;
         }}
         * {{
@@ -1218,14 +1189,21 @@ class CSI3DDisplay:
             display: flex;
             flex-direction: column;
         }}
+        @media (min-width: 1025px) {{
+            body {{ overflow: hidden; height: 100vh; }}
+        }}
+        @media (max-width: 1024px) {{
+            body {{ overflow-y: auto; }}
+        }}
         .header {{
-            padding: 14px 24px;
+            padding: 10px 24px;
             background: linear-gradient(135deg, #08111f 0%, #132238 100%);
             border-bottom: 1px solid #203247;
+            flex-shrink: 0;
         }}
         .header h1 {{
             margin: 0;
-            font-size: 20px;
+            font-size: clamp(16px, 2.5vw, 20px);
         }}
         .header p {{
             margin: 6px 0 0 0;
@@ -1233,16 +1211,22 @@ class CSI3DDisplay:
             font-size: 12px;
         }}
         .content {{
-            flex: 1;
-            min-height: 0;
+            flex: 1 1 auto;
+            min-height: 680px;
             width: 100%;
         }}
         .footer {{
-            padding: 10px 24px;
+            padding: 8px 24px;
             border-top: 1px solid #203247;
             color: #90a7bd;
             font-size: 11px;
             background: #0b1626;
+            flex-shrink: 0;
+        }}
+        @media (max-width: 640px) {{
+            .header {{ padding: 8px 12px; }}
+            .footer {{ padding: 6px 12px; font-size: 10px; }}
+            .content {{ min-height: 480px; }}
         }}
     </style>
 </head>
@@ -1388,7 +1372,7 @@ def _build_static_shell_html(display: CSI3DDisplay) -> str:
             margin: 0;
             padding: 0;
             width: 100%;
-            height: 100%;
+            min-height: 100vh;
             background: #08111f;
             color: #dbe7f3;
         }}
@@ -1398,11 +1382,17 @@ def _build_static_shell_html(display: CSI3DDisplay) -> str:
         body {{
             display: flex;
             flex-direction: column;
-            overflow: hidden;
             font-family: "Microsoft JhengHei", sans-serif;
         }}
+        /* ── RWD: 大螢幕不捲動; 平板/手機允許捲動 ── */
+        @media (min-width: 1025px) {{
+            body {{ overflow: hidden; height: 100vh; }}
+        }}
+        @media (max-width: 1024px) {{
+            body {{ overflow-y: auto; }}
+        }}
         .header {{
-            padding: 12px 24px;
+            padding: 10px 24px;
             background: linear-gradient(135deg, #08111f 0%, #132238 100%);
             border-bottom: 1px solid #203247;
             display: flex;
@@ -1410,10 +1400,11 @@ def _build_static_shell_html(display: CSI3DDisplay) -> str:
             align-items: center;
             gap: 12px;
             flex-wrap: wrap;
+            flex-shrink: 0;
         }}
         .header h1 {{
             margin: 0;
-            font-size: 20px;
+            font-size: clamp(16px, 2.5vw, 20px);
         }}
         #status-text {{
             padding: 6px 12px;
@@ -1426,13 +1417,14 @@ def _build_static_shell_html(display: CSI3DDisplay) -> str:
         }}
         .content {{
             flex: 1 1 auto;
-            min-height: 0;
+            min-height: 680px;
             width: 100%;
-            overflow: hidden;
+            overflow: visible;
         }}
         #plot {{
             width: 100%;
             height: 100%;
+            min-height: 680px;
         }}
         .footer {{
             padding: 8px 24px;
@@ -1440,6 +1432,26 @@ def _build_static_shell_html(display: CSI3DDisplay) -> str:
             color: #90a7bd;
             font-size: 11px;
             background: #0b1626;
+            flex-shrink: 0;
+        }}
+        /* ── 平板 ── */
+        @media (max-width: 1024px) {{
+            .content, #plot {{
+                min-height: 600px;
+            }}
+        }}
+        /* ── 手機 ── */
+        @media (max-width: 640px) {{
+            .header {{
+                padding: 8px 12px;
+            }}
+            .footer {{
+                padding: 6px 12px;
+                font-size: 10px;
+            }}
+            .content, #plot {{
+                min-height: 480px;
+            }}
         }}
     </style>
 </head>
@@ -1523,6 +1535,7 @@ def _run_dash_live(display: CSI3DDisplay, port: int = 8050, debug: bool = False)
 <html lang="zh-Hant">
     <head>
         {%metas%}
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>{%title%}</title>
         {%favicon%}
         {%css%}
@@ -1531,16 +1544,12 @@ def _run_dash_live(display: CSI3DDisplay, port: int = 8050, debug: bool = False)
                 margin: 0;
                 padding: 0;
                 width: 100%;
-                height: 100%;
+                min-height: 100dvh;
                 background: #08111f;
                 color: #dbe7f3;
+                overflow-y : auto;
             }
-            * {
-                box-sizing: border-box;
-            }
-            body {
-                overflow: hidden;
-            }
+          
         </style>
     </head>
     <body>
@@ -1556,29 +1565,30 @@ def _run_dash_live(display: CSI3DDisplay, port: int = 8050, debug: bool = False)
     app.layout = html.Div(
         style={
             "backgroundColor": "#08111f",
-            "height": "100vh",
+            "minHeight": "100vh",
             "display": "flex",
             "flexDirection": "column",
-            "overflow": "hidden",
             "fontFamily": "Microsoft JhengHei, sans-serif",
         },
         children=[
+            # ── Header ──
             html.Div(
                 style={
                     "background": "linear-gradient(135deg, #08111f 0%, #132238 100%)",
-                    "padding": "12px 24px",
+                    "padding": "10px 24px",
                     "borderBottom": "1px solid #203247",
                     "display": "flex",
                     "justifyContent": "space-between",
                     "alignItems": "center",
                     "gap": "12px",
                     "flexWrap": "wrap",
+                    "flexShrink": "0",
                 },
                 children=[
                     html.Div(
                         APP_TITLE,
                         style={
-                            "fontSize": "18px",
+                            "fontSize": "clamp(14px, 2vw, 18px)",
                             "fontWeight": "700",
                             "color": "#dbe7f3",
                         },
@@ -1586,16 +1596,29 @@ def _run_dash_live(display: CSI3DDisplay, port: int = 8050, debug: bool = False)
                     html.Div(id="status-text"),
                 ],
             ),
+            # ── Main figure ──
             html.Div(
-                style={"flex": "1 1 auto", "minHeight": "0", "overflow": "hidden"},
+                style={
+                    "flex": "1 1 auto",
+                    "minHeight": "680px",
+                    "position": "relative",
+                    "overflow": "visible",
+                },
                 children=[
                     dcc.Graph(
                         id="csi-figure",
-                        style={"height": "100%", "width": "100%", "margin": "0", "padding": "0"},
+                        style={
+                            "height": "100%",
+                            "minHeight": "680px",
+                            "width": "100%",
+                            "margin": "0",
+                            "padding": "0",
+                        },
                         config={"displaylogo": False, "responsive": True},
                     )
                 ],
             ),
+            # ── Footer ──
             html.Div(
                 id="update-info",
                 style={
@@ -1604,6 +1627,7 @@ def _run_dash_live(display: CSI3DDisplay, port: int = 8050, debug: bool = False)
                     "fontSize": "11px",
                     "color": "#90a7bd",
                     "backgroundColor": "#0b1626",
+                    "flexShrink": "0",
                 },
             ),
             dcc.Interval(id="refresh-interval", interval=display.update_interval_ms, n_intervals=0),
