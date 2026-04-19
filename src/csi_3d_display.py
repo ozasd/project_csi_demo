@@ -57,12 +57,18 @@ SUBPLOT_COLUMN_WIDTHS = [0.5, 0.5]
 SUBPLOT_ROW_HEIGHTS = [0.58, 0.42]
 SUBPLOT_H_SPACING = 0.08
 SUBPLOT_V_SPACING = 0.12
+TOP_SCENE_DOMAIN_MAX_X = 0.96
+CLOUD_SCENE_CAMERA = dict(
+    eye=dict(x=1.28, y=-1.42, z=0.74),
+    center=dict(x=0.16, y=0.0, z=-0.04),
+)
+CLOUD_SCENE_ASPECTRATIO = dict(x=1.9, y=1.35, z=0.74)
 
 LAYOUT_COMMON = dict(
     paper_bgcolor="#08111f",
     plot_bgcolor="#08111f",
     font=dict(family="Microsoft JhengHei, sans-serif", color="#dbe7f3"),
-    margin=dict(l=28, r=72, t=100, b=56),
+    margin=dict(l=28, r=36, t=100, b=56),
     uirevision="csi-layout-static",
 )
 
@@ -125,6 +131,15 @@ def _smooth_scale(current: float, target: float, minimum: float) -> float:
     if target > current:
         return current * 0.82 + target * 0.18
     return current * 0.96 + target * 0.04
+
+
+def _compute_time_window_max(time_axis: np.ndarray) -> float:
+    """Keep time axes close to the current data span instead of forcing a wide empty range."""
+    if time_axis.size == 0:
+        return 0.5
+    latest_time = max(0.0, float(time_axis[-1]))
+    padding = max(0.05, latest_time * 0.06)
+    return max(0.5, latest_time + padding)
 
 
 def _build_status(snapshot: SceneSnapshot, detector: MotionDetector) -> tuple[str, str]:
@@ -301,7 +316,7 @@ def _estimate_targets(
 
 def _make_subplot_figure(titles: tuple[str, ...]) -> go.Figure:
     """建立共用 subplot 骨架。"""
-    return make_subplots(
+    fig = make_subplots(
         rows=2,
         cols=2,
         specs=SUBPLOT_SPECS,
@@ -311,6 +326,18 @@ def _make_subplot_figure(titles: tuple[str, ...]) -> go.Figure:
         vertical_spacing=SUBPLOT_V_SPACING,
         subplot_titles=titles,
     )
+    scene_y0, scene_y1 = [float(value) for value in fig.layout.scene.domain.y]
+    fig.update_layout(
+        scene=dict(
+            domain=dict(
+                x=[0.0, TOP_SCENE_DOMAIN_MAX_X],
+                y=[scene_y0, scene_y1],
+            )
+        )
+    )
+    if fig.layout.annotations:
+        fig.layout.annotations[0].x = TOP_SCENE_DOMAIN_MAX_X / 2.0
+    return fig
 
 
 def _shared_colorbar_style(title: str) -> dict:
@@ -332,8 +359,8 @@ def _scene_colorbar(fig: go.Figure, title: str) -> dict:
         **_shared_colorbar_style(title),
         "len": max((y1 - y0) * 0.84, 0.30),
         "y": (y0 + y1) / 2.0,
-        "x": min(x1 + 0.02, 0.99),
-        "xanchor": "left",
+        "x": max(x1 - 0.008, 0.90),
+        "xanchor": "right",
         "thickness": 16,
         "thicknessmode": "pixels",
     }
@@ -708,7 +735,7 @@ def build_figure(
         f"最大差分 {snapshot.peak_delta:.3f}"
     )
 
-    max_time = max(2.0, float(time_axis.max()))
+    max_time = _compute_time_window_max(time_axis)
     fig.update_layout(
         **LAYOUT_COMMON,
         height=scales.figure_height,
@@ -753,8 +780,8 @@ def build_figure(
             showbackground=True,
             range=[0, scales.cloud_z_max],
         ),
-        camera=dict(eye=dict(x=1.55, y=-1.85, z=0.85)),
-        aspectratio=dict(x=1.35, y=2.0, z=0.8),
+        camera=CLOUD_SCENE_CAMERA,
+        aspectratio=CLOUD_SCENE_ASPECTRATIO,
         uirevision="csi-scene-static",
     )
 
@@ -883,7 +910,7 @@ def build_sti_figure(
         f"最大差分 {snapshot.peak_delta:.3f}"
     )
 
-    max_time = max(2.0, float(time_axis.max()))
+    max_time = _compute_time_window_max(time_axis)
     fig.update_layout(
         **LAYOUT_COMMON,
         height=scales.figure_height,
@@ -928,8 +955,8 @@ def build_sti_figure(
             showbackground=True,
             range=[0, scales.cloud_z_max],
         ),
-        camera=dict(eye=dict(x=1.55, y=-1.85, z=0.85)),
-        aspectratio=dict(x=1.35, y=2.0, z=0.8),
+        camera=CLOUD_SCENE_CAMERA,
+        aspectratio=CLOUD_SCENE_ASPECTRATIO,
         uirevision="csi-scene-static",
     )
 
