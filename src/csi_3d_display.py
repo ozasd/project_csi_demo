@@ -50,19 +50,19 @@ DEFAULT_SPECTROGRAM_Z_MAX = 0.32
 
 # ── 共用 subplot / layout 配置 ──────────────────────────────────
 SUBPLOT_SPECS = [
-    [{"type": "scene", "rowspan": 2}, {"type": "xy", "secondary_y": True}],
-    [None, {"type": "heatmap"}],
+    [{"type": "scene", "colspan": 2}, None],
+    [{"type": "xy", "secondary_y": True}, {"type": "heatmap"}],
 ]
-SUBPLOT_COLUMN_WIDTHS = [0.55, 0.45]
-SUBPLOT_ROW_HEIGHTS = [0.48, 0.52]
-SUBPLOT_H_SPACING = 0.05
-SUBPLOT_V_SPACING = 0.09
+SUBPLOT_COLUMN_WIDTHS = [0.5, 0.5]
+SUBPLOT_ROW_HEIGHTS = [0.58, 0.42]
+SUBPLOT_H_SPACING = 0.08
+SUBPLOT_V_SPACING = 0.12
 
 LAYOUT_COMMON = dict(
     paper_bgcolor="#08111f",
     plot_bgcolor="#08111f",
     font=dict(family="Microsoft JhengHei, sans-serif", color="#dbe7f3"),
-    margin=dict(l=28, r=28, t=100, b=56),
+    margin=dict(l=28, r=72, t=100, b=56),
     uirevision="csi-layout-static",
 )
 
@@ -313,6 +313,49 @@ def _make_subplot_figure(titles: tuple[str, ...]) -> go.Figure:
     )
 
 
+def _shared_colorbar_style(title: str) -> dict:
+    """Return the shared dashboard colorbar styling."""
+    return dict(
+        title=dict(text=title, font=dict(color="#dbe7f3", size=12)),
+        tickfont=dict(color="#8aa0b7", size=10),
+        bgcolor="rgba(8,17,31,0.84)",
+        bordercolor="#203247",
+        borderwidth=1,
+    )
+
+
+def _scene_colorbar(fig: go.Figure, title: str) -> dict:
+    """Place the 3D cloud colorbar on the right of the top full-width scene."""
+    x0, x1 = [float(value) for value in fig.layout.scene.domain.x]
+    y0, y1 = [float(value) for value in fig.layout.scene.domain.y]
+    return {
+        **_shared_colorbar_style(title),
+        "len": max((y1 - y0) * 0.84, 0.30),
+        "y": (y0 + y1) / 2.0,
+        "x": min(x1 + 0.02, 0.99),
+        "xanchor": "left",
+        "thickness": 16,
+        "thicknessmode": "pixels",
+    }
+
+
+def _bottom_right_colorbar(fig: go.Figure, title: str) -> dict:
+    """Place the bottom-right heatmap colorbar under its chart."""
+    x0, x1 = [float(value) for value in fig.layout.xaxis2.domain]
+    y0, y1 = [float(value) for value in fig.layout.yaxis3.domain]
+    return {
+        **_shared_colorbar_style(title),
+        "orientation": "h",
+        "len": max((x1 - x0) * 0.62, 0.20),
+        "x": (x0 + x1) / 2.0,
+        "xanchor": "center",
+        "y": max(y0 + (y1 - y0) * 0.05, 0.03),
+        "yanchor": "bottom",
+        "thickness": 16,
+        "thicknessmode": "pixels",
+    }
+
+
 def _empty_figure(message: str, scales: DisplayScales) -> go.Figure:
     """建立資料不足時的佔位圖。"""
     fig = _make_subplot_figure(("3D 差分雲霧圖", "子載波變化圖", "STFT Spectrogram"))
@@ -323,8 +366,8 @@ def _empty_figure(message: str, scales: DisplayScales) -> go.Figure:
     )
     fig.add_annotation(
         text="等待 CSI 幀資料...",
-        x=0.20,
-        y=0.54,
+        x=0.47,
+        y=0.76,
         xref="paper",
         yref="paper",
         showarrow=False,
@@ -332,8 +375,8 @@ def _empty_figure(message: str, scales: DisplayScales) -> go.Figure:
     )
     fig.add_annotation(
         text="右上會顯示基線 / 目前 / 差分 / 輪廓代理",
-        x=0.79,
-        y=0.66,
+        x=0.215,
+        y=0.19,
         xref="paper",
         yref="paper",
         showarrow=False,
@@ -341,8 +384,8 @@ def _empty_figure(message: str, scales: DisplayScales) -> go.Figure:
     )
     fig.add_annotation(
         text="右下會顯示 STFT 頻譜圖",
-        x=0.79,
-        y=0.24,
+        x=0.725,
+        y=0.19,
         xref="paper",
         yref="paper",
         showarrow=False,
@@ -400,15 +443,7 @@ def _add_cloud_panel(
                 cmax=scales.spectrogram_z_max,
                 opacity=0.72,
                 line=dict(width=0),
-                colorbar=dict(
-                    title=dict(text=color_title, font=dict(color="#dbe7f3", size=12)),
-                    tickfont=dict(color="#8aa0b7", size=10),
-                    bgcolor="rgba(8,17,31,0.84)",
-                    bordercolor="#203247",
-                    borderwidth=1,
-                    len=0.55,
-                    x=0.52,
-                ),
+                colorbar=_scene_colorbar(fig, color_title),
             ),
             hovertemplate=(
                 "子載波 %{x}<br>"
@@ -435,8 +470,8 @@ def _add_profile_panel(fig: go.Figure, snapshot: SceneSnapshot) -> None:
                 name="靜止前基線",
                 line=dict(color="#4cc9f0", width=2),
             ),
-            row=1,
-            col=2,
+            row=2,
+            col=1,
             secondary_y=False,
         )
 
@@ -449,8 +484,8 @@ def _add_profile_panel(fig: go.Figure, snapshot: SceneSnapshot) -> None:
                 name="目前場景",
                 line=dict(color="#ffffff", width=2.5),
             ),
-            row=1,
-            col=2,
+            row=2,
+            col=1,
             secondary_y=False,
         )
 
@@ -465,8 +500,8 @@ def _add_profile_panel(fig: go.Figure, snapshot: SceneSnapshot) -> None:
                 fill="tozeroy",
                 fillcolor="rgba(238, 150, 75, 0.18)",
             ),
-            row=1,
-            col=2,
+            row=2,
+            col=1,
             secondary_y=True,
         )
 
@@ -479,8 +514,8 @@ def _add_profile_panel(fig: go.Figure, snapshot: SceneSnapshot) -> None:
                 name="輪廓代理",
                 line=dict(color="#ffd166", width=3, dash="dot"),
             ),
-            row=1,
-            col=2,
+            row=2,
+            col=1,
             secondary_y=True,
         )
 
@@ -497,8 +532,8 @@ def _add_sti_panel(
     if sti_matrix.size == 0:
         fig.add_annotation(
             text="需要更多連續 CSI 幀才能估算 STFT Spectrogram",
-            x=0.79,
-            y=0.18,
+            x=0.725,
+            y=0.19,
             xref="paper",
             yref="paper",
             showarrow=False,
@@ -550,8 +585,8 @@ def _add_sti_heatmap_panel(
     if sti_matrix.size == 0:
         fig.add_annotation(
             text="Waiting for enough CSI frames to build STI",
-            x=0.79,
-            y=0.18,
+            x=0.725,
+            y=0.19,
             xref="paper",
             yref="paper",
             showarrow=False,
@@ -568,16 +603,7 @@ def _add_sti_heatmap_panel(
             zmin=0.0,
             zmax=scales.spectrogram_z_max,
             zsmooth="best",
-            colorbar=dict(
-                title=dict(text=color_title, font=dict(color="#dbe7f3", size=12)),
-                tickfont=dict(color="#8aa0b7", size=10),
-                bgcolor="rgba(8,17,31,0.84)",
-                bordercolor="#203247",
-                borderwidth=1,
-                len=0.28,
-                x=1.01,
-                y=0.18,
-            ),
+            showscale=False,
             hovertemplate=(
                 "Time %{x:.2f}s<br>"
                 "Subcarrier %{y}<br>"
@@ -588,6 +614,57 @@ def _add_sti_heatmap_panel(
         row=2,
         col=2,
     )
+
+
+def _add_spectrogram_panel(
+    fig: go.Figure,
+    spectrogram_result: tuple[np.ndarray, np.ndarray, np.ndarray] | None,
+    scales: DisplayScales,
+) -> None:
+    """Add the bottom-right spectrogram panel used by the non-STI layout."""
+    if spectrogram_result is None:
+        fig.add_annotation(
+            text="?閬憭?? CSI 撟?隡啁? STFT Spectrogram",
+            x=0.725,
+            y=0.19,
+            xref="paper",
+            yref="paper",
+            showarrow=False,
+            font=dict(size=12, color="#6f859b"),
+        )
+        return
+
+    centers, freq_axis, spectrogram = spectrogram_result
+    fig.add_trace(
+        go.Heatmap(
+            x=centers,
+            y=freq_axis,
+            z=spectrogram,
+            colorscale=SPECTROGRAM_COLORSCALE,
+            zmin=0.0,
+            zmax=scales.spectrogram_z_max,
+            zsmooth="best",
+            colorbar=dict(
+                title=dict(text="?餉??賡?", font=dict(color="#dbe7f3", size=12)),
+                tickfont=dict(color="#8aa0b7", size=10),
+                bgcolor="rgba(8,17,31,0.84)",
+                bordercolor="#203247",
+                borderwidth=1,
+                len=0.28,
+                x=1.01,
+                y=0.18,
+            ),
+            hovertemplate=(
+                "?? %{x:.2f}s<br>"
+                "?餌? %{y:.2f} Hz<br>"
+                "?賡? %{z:.3f}<extra></extra>"
+            ),
+            name="STFT Spectrogram",
+        ),
+        row=2,
+        col=2,
+    )
+    fig.data[-1].colorbar = _bottom_right_colorbar(fig, "?餉??賡?")
 
 
 def build_figure(
@@ -687,16 +764,16 @@ def build_figure(
         tickvals=SUBCARRIER_TICKS,
         gridcolor="#203247",
         zerolinecolor="#203247",
-        row=1,
-        col=2,
+        row=2,
+        col=1,
     )
     fig.update_yaxes(
         title_text="振幅",
         gridcolor="#203247",
         zerolinecolor="#203247",
         range=[0, scales.profile_y_max],
-        row=1,
-        col=2,
+        row=2,
+        col=1,
         secondary_y=False,
     )
     fig.update_yaxes(
@@ -704,8 +781,8 @@ def build_figure(
         gridcolor="#203247",
         zerolinecolor="#203247",
         range=[0, scales.delta_y_max],
-        row=1,
-        col=2,
+        row=2,
+        col=1,
         secondary_y=True,
     )
     fig.update_xaxes(
@@ -737,17 +814,17 @@ def build_empty_sti_figure(message: str, scales: DisplayScales) -> go.Figure:
     )
     fig.add_annotation(
         text="Waiting for CSI frames...",
-        x=0.20,
-        y=0.54,
+        x=0.47,
+        y=0.76,
         xref="paper",
         yref="paper",
         showarrow=False,
         font=dict(size=18, color="#8aa0b7"),
     )
     fig.add_annotation(
-        text="Top-right panel shows baseline, live profile, delta and silhouette.",
-        x=0.79,
-        y=0.66,
+        text="Bottom-left panel shows baseline, live profile, delta and silhouette.",
+        x=0.215,
+        y=0.19,
         xref="paper",
         yref="paper",
         showarrow=False,
@@ -755,8 +832,8 @@ def build_empty_sti_figure(message: str, scales: DisplayScales) -> go.Figure:
     )
     fig.add_annotation(
         text="Bottom-right panel switches to STI instead of Doppler/STFT.",
-        x=0.79,
-        y=0.24,
+        x=0.725,
+        y=0.19,
         xref="paper",
         yref="paper",
         showarrow=False,
@@ -862,16 +939,16 @@ def build_sti_figure(
         tickvals=SUBCARRIER_TICKS,
         gridcolor="#203247",
         zerolinecolor="#203247",
-        row=1,
-        col=2,
+        row=2,
+        col=1,
     )
     fig.update_yaxes(
         title_text="Amplitude",
         gridcolor="#203247",
         zerolinecolor="#203247",
         range=[0, scales.profile_y_max],
-        row=1,
-        col=2,
+        row=2,
+        col=1,
         secondary_y=False,
     )
     fig.update_yaxes(
@@ -879,8 +956,8 @@ def build_sti_figure(
         gridcolor="#203247",
         zerolinecolor="#203247",
         range=[0, scales.delta_y_max],
-        row=1,
-        col=2,
+        row=2,
+        col=1,
         secondary_y=True,
     )
     fig.update_xaxes(

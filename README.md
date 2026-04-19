@@ -1,191 +1,332 @@
-# WIFI-CSI
+# ESP32 CSI 教學版 README
 
-這個專案目前只保留 `ESP32 CSI -> Python -> 視覺化` 這一條流程。
+這個專案用來示範一條完整流程：
 
-重點不是做 Wi-Fi 掃描展示，而是：
-- 先用 ESP32 擷取 `CSI_DATA`
-- 啟動時先初始化「靜態空間基線」
-- 再把目前場景相對於基線的差分，畫成 3D 雲霧圖
-- 右側另外畫出「靜止前 / 靜止後 / 差分 / 輪廓代理」
+`ESP32 CSI -> Python 解析 -> 即時視覺化`
 
-注意：
-- 這裡的「輪廓」是 CSI 差分代理，不是真正的相機輪廓或 3D 幾何外形。
-- 如果你在初始化基線時場景裡已經有人或物體，那個狀態會被當成背景。
+目前專案重點不是做精準定位，而是把 ESP32 輸出的 `CSI_DATA` 轉成容易教學展示的畫面，讓學生可以直接看到：
 
-## 日常使用
+- 靜態背景和目前訊號的差異
+- 子載波隨時間的變化
+- 人體或物體移動時的 CSI 擾動
 
-板子已經燒好韌體後，平常直接用：
+## 這個專案現在會顯示什麼
 
-```cmd
-cd /d C:\Users\ozasd\Desktop\WIFI-CSI
-python main.py
-```
+目前 dashboard 版面是三個區塊：
 
-`python main.py` 會做這些事：
-- 嘗試切到 `wifi-csi` Python 環境
-- 開啟 ESP32 的序列埠
-- 重啟 ESP32
-- 如果韌體要求輸入 Wi-Fi，就在終端機提示你輸入
-- 等到看到 `CSI_DATA`
-- 自動轉進 `csi_main.py`
+- 上方：`3D CSI 雲霧圖`
+- 左下：`子載波變化圖`
+- 右下：`STI Heatmap`
 
-之後 `csi_main.py` 會先做：
-- 接收 CSI
-- 初始化靜態空間基線
-- 基線完成後再進入 3D 視覺化
-- 持續輸出監控 log，若有效子載波長時間掉到過低振幅會告警
+說明：
 
-## 新的顯示流程
+- 只有上方 3D 雲霧圖保留 `基線差分` 色條。
+- 右下 STI heatmap 不再顯示自己的色條，避免教學畫面太亂。
+- 這裡的「輪廓」與「差分」都是 CSI 代理特徵，不是真正的相機輪廓或 3D 重建。
 
-目前畫面分成三塊：
+## 專案流程
 
-- 左側：`3D 差分雲霧圖`
-  - X 軸：signed subcarrier，`-26..-1, +1..+26`
-  - Y 軸：時間
-  - Z 軸：CSI 振幅
-  - 顏色：相對靜態基線的差分強度
-  - 半透明曲面：啟動時鎖定的靜態基線
+建議把整個系統理解成兩層：
 
-- 右上：`子載波變化圖`
-  - `靜止前基線`
-  - `目前場景`
-  - `前景差分`
-  - `輪廓代理`
+1. `main.py`
+作用：一鍵啟動。它會先打開序列埠、重啟 ESP32、等待 Wi-Fi 提示或 `CSI_DATA`，然後再接手啟動視覺化。
 
-- 右下：`STFT Spectrogram`
-  - 由 CSI 差分時間訊號做短時傅立葉分析
-  - 用來看場景變化的時間-頻率能量分布
-  - 這是代理圖，不是完整 RF 速度量測
+2. `csi_main.py`
+作用：真正的 CSI 視覺化程式。它會讀取 ESP32 的 `CSI_DATA`，建立靜態場景基線，然後啟動 Dash 或靜態 HTML。
 
-建議操作方式：
+## 環境需求
 
-1. 啟動後先讓空間保持靜止，等基線初始化完成。
-2. 初始化完成後，再把人或物體放進監測區域。
-3. 左側看差分雲霧分布，右側看輪廓代理強度。
+- Windows 10 或 Windows 11
+- ESP32 開發板
+- USB 線
+- 一個可讓 ESP32 連上的 Wi-Fi AP
+- Conda
 
-如果你想重新掃描一個新的空間基線，最簡單的方法就是重啟程式。
+## 1. 建立 Python 環境
 
-## 常用參數
-
-最常用的是：
+在 `cmd` 執行：
 
 ```cmd
-python main.py --com COM3
-python main.py --ssid "Tracy 2" --password a7802568
-python main.py --static
-python main.py --baseline-frames 120
-python main.py --baseline-timeout 40
+cd /d C:\Users\ozasd\Documents\project_csi_demo
+conda env create -f environment.yml
+conda activate wifi-csi
 ```
 
-如果你不想經過 launcher，也可以直接跑：
+如果你的 `cmd` 內找不到 `conda`，改用：
 
 ```cmd
-python csi_main.py --com COM3
-python csi_main.py --com COM3 --static
-python csi_main.py --com COM3 --baseline-frames 120
+call C:\ProgramData\anaconda3\Scripts\activate.bat wifi-csi
 ```
 
-參數說明：
-- `--com`：ESP32 的序列埠，例如 `COM3`
-- `--static`：輸出成靜態 HTML，不開 Dash
-- `--frames`：3D 時間軸保留幀數
-- `--refresh`：畫面刷新間隔，單位毫秒
-- `--baseline-frames`：初始化靜態空間時，要收幾筆 CSI 當背景
-- `--baseline-timeout`：等待背景初始化的最長秒數
+這個環境會安裝：
 
-## 第一次燒錄
+- `numpy`
+- `scipy`
+- `matplotlib`
+- `pandas`
+- `plotly`
+- `dash`
+- `pyserial`
+- `rich`
 
-詳細步驟在 [docs/esp32_csi_flash_guide.md](docs/esp32_csi_flash_guide.md)。
+## 2. 燒錄 ESP32 韌體
 
-第一次只需要做一次：
+本專案使用 ESP32 輸出的 `CSI_DATA` 當輸入，所以板子端必須先能正常輸出 CSI。
 
-```powershell
-mkdir C:\esp
-cd C:\esp
-git clone -b v5.1.4 --recursive https://github.com/espressif/esp-idf.git
-cd esp-idf
-powershell -ExecutionPolicy Bypass -File .\install.ps1 esp32
+詳細燒錄步驟請看：
 
-cd C:\esp
-git clone https://github.com/espressif/esp-csi.git
-```
+- [docs/esp32_csi_flash_guide.md](docs/esp32_csi_flash_guide.md)
 
-載入 ESP-IDF 環境：
+如果你只想先確認韌體有沒有正常工作，可以先用：
 
 ```cmd
-set PATH=C:\ProgramData\anaconda3;C:\ProgramData\anaconda3\Scripts;%PATH%
-call C:\esp\esp-idf\export.bat
-```
-
-燒錄：
-
-```cmd
-cd /d C:\esp\esp-csi\examples\get-started\csi_recv_router
-idf.py -p COM3 flash
-```
-
-如果失敗，就按住 `BOOT/IO0`、短按 `EN`，再重試。
-
-## 手動確認韌體
-
-如果你要先確認 ESP32 韌體本身有沒有在吐 CSI：
-
-```cmd
-cd /d C:\esp\esp-csi\examples\get-started\csi_recv_router
 idf.py -p COM3 monitor -b 921600
 ```
 
-看到：
+正常情況下，你應該會看到：
 
 ```text
 Please input ssid password:
 ```
 
-就輸入：
+輸入 Wi-Fi 後，之後應該開始持續出現：
 
 ```text
-"你的WiFi名稱" 你的密碼
+CSI_DATA,...
 ```
 
-接著只要開始出現 `CSI_DATA,...`，就代表韌體端正常。
+看到 `CSI_DATA` 代表板子端基本正常。
 
-離開 monitor：
+## 3. 執行專案
 
-```text
-Ctrl+]
+### 建議方式：一鍵啟動
+
+在 `cmd` 執行：
+
+```cmd
+cd /d C:\Users\ozasd\Documents\project_csi_demo
+conda activate wifi-csi
+python main.py --com COM3
 ```
 
-## 常見問題
+這是最適合教學時使用的入口。它會自動做下面幾件事：
 
-- `idf.py` 無法辨識：
-  - 你還沒在該終端載入 `C:\esp\esp-idf\export.bat`
+- 開啟 ESP32 的序列埠
+- 重啟 ESP32
+- 等待 Wi-Fi 輸入提示或直接等到 `CSI_DATA`
+- 視情況輸入 Wi-Fi
+- 啟動視覺化
 
-- `pyserial` 缺少：
-  - 先 `conda activate wifi-csi`
-  - 再安裝或直接用 `python main.py`
+### 直接指定 Wi-Fi
 
-- `COM3 is busy`：
-  - 先關掉 `idf.py monitor`
-  - 不要同時開 monitor 和 Python 視覺化
+如果不想在互動式提示中輸入：
 
-- 啟動後畫面一直顯示初始化：
-  - 先確認 ESP32 真的有在輸出 `CSI_DATA`
-  - 再確認場景不要一直晃動
-  - 如果序列資料很慢，可以把 `--baseline-timeout` 調大
+```cmd
+python main.py --com COM3 --ssid "Your WiFi Name" --password your_password
+```
 
-- 輪廓看起來不穩：
-  - 這是單一 CSI 串流的代理輪廓，本來就不是高精度形狀重建
-  - 可以先讓背景更乾淨、減少人為干擾，再增加 `--baseline-frames`
+### 靜態 HTML 模式
 
-- 中間好像有一個子載波掉到 0：
-  - 這通常是中心 `DC / null subcarrier`，不是有效子載波
-  - 目前解析流程已經把 `-27 / 0 / +27` 這三個空子載波排除，不會再畫進 52 個有效子載波
-  - 如果之後還有真正的有效子載波長時間過低，終端會印出告警 log
+如果 Dash 在某台教室電腦上不穩，可以改用：
 
-## 目前重要檔案
+```cmd
+python main.py --com COM3 --static
+```
+
+這個模式會把畫面寫到 `data/`，並用本機 HTTP 服務更新圖表。
+
+### 直接啟動視覺化程式
+
+如果你的 ESP32 已經在穩定輸出 `CSI_DATA`，也可以直接略過 Wi-Fi 設定階段：
+
+```cmd
+python csi_main.py --com COM3
+```
+
+## 4. 常用指令
+
+```cmd
+python main.py --com COM3
+python main.py --com COM4
+python main.py --com COM3 --static
+python main.py --com COM3 --baseline-frames 120
+python main.py --com COM3 --baseline-timeout 40
+python main.py --com COM3 --frames 120 --refresh 200
+python main.py --com COM3 --ssid "Your WiFi Name" --password your_password
+python csi_main.py --com COM3
+```
+
+## 5. 重要參數
+
+### `main.py`
+
+- `--com`
+作用：ESP32 的序列埠，預設是 `COM3`
+
+- `--baud`
+作用：ESP32 鮑率，預設是 `921600`
+
+- `--ssid`
+作用：直接提供 Wi-Fi 名稱，避免互動輸入
+
+- `--password`
+作用：直接提供 Wi-Fi 密碼
+
+- `--static`
+作用：改用靜態 HTML 模式，不走 Dash
+
+- `--frames`
+作用：時間軸保留的 CSI 幀數，預設 `80`
+
+- `--refresh`
+作用：畫面更新間隔，單位毫秒，預設 `250`
+
+- `--baseline-frames`
+作用：建立靜態場景基線時需要多少筆 CSI，預設 `80`
+
+- `--baseline-timeout`
+作用：等待靜態場景初始化完成的秒數，預設 `30`
+
+- `--skip-setup`
+作用：略過 Wi-Fi 初始化，直接跳到 `csi_main.py`
+
+### `csi_main.py`
+
+除了上面幾個常用參數，還支援：
+
+- `--threshold`
+作用：RSSI 標準差門檻，預設 `0.3`
+
+- `--composite-threshold`
+作用：複合運動門檻，預設 `1.2`
+
+## 6. 教學展示建議流程
+
+下面這一套流程最容易讓學生看懂：
+
+1. 先保持空間完全不動，等待基線初始化完成。
+2. 讓學生先看靜止畫面，說明這是系統的背景參考。
+3. 讓一個人走進畫面或揮手，觀察 3D 雲霧圖與子載波圖變化。
+4. 再讓人停下來，觀察系統如何慢慢回到穩定狀態。
+5. 比較不同動作幅度，例如揮手、走動、靠近天線。
+
+教學提醒：
+
+- 基線初始化期間，空間越安靜越好。
+- ESP32、人體、路由器位置只要改動太多，就要重新建立基線。
+- CSI 對環境非常敏感，教學時請避免一邊講解一邊大量移動設備。
+
+## 7. 畫面解讀
+
+### 上方：3D CSI 雲霧圖
+
+- X 軸：signed subcarrier
+- Y 軸：time
+- Z 軸：amplitude
+- 顏色：相對於基線的差分強度
+
+解讀方式：
+
+- 顏色越亮，表示和靜態背景差異越大。
+- 雲霧越分散或越厚，通常代表空間內擾動變多。
+- 這是教學視覺化，不是幾何意義上的真實空間重建。
+
+### 左下：子載波變化圖
+
+會同時顯示幾種曲線：
+
+- 基線 profile
+- 目前 profile
+- 差分 profile
+- silhouette 代理
+
+解讀方式：
+
+- 基線和目前值差越大，代表環境擾動越明顯。
+- 差分 profile 可以幫助學生理解「哪些子載波變化最大」。
+
+### 右下：STI Heatmap
+
+- 橫軸：time
+- 縱軸：signed subcarrier
+- 顏色：各時間點與各子載波的 CSI 變化強度
+
+解讀方式：
+
+- 適合觀察變化是持續發生，還是只在某些時間點突然出現。
+- 目前這張圖不顯示獨立色條，避免和上方雲霧圖的 UI 重複。
+
+## 8. 輸出檔案
+
+執行期間會在 `data/` 產生紀錄檔。
+
+- `csi_runtime_log_YYYYMMDD_HHMMSS.csv`
+用途：記錄每次 dashboard refresh 的狀態與統計值
+
+如果使用 `--static`，也會產生：
+
+- `csi_scene_delta.html`
+- `csi_scene_delta.json`
+
+## 9. 常見問題
+
+### `conda` 找不到
+
+請在 `cmd` 先執行：
+
+```cmd
+call C:\ProgramData\anaconda3\Scripts\activate.bat wifi-csi
+```
+
+### `pyserial` 缺少
+
+代表你很可能沒有進入正確的 conda 環境。請先確認：
+
+```cmd
+conda activate wifi-csi
+python main.py --com COM3
+```
+
+### `COM3 is busy`
+
+代表序列埠已被其他程式佔用。最常見原因是：
+
+- 你還開著 `idf.py monitor`
+- 另一個 Python 程式已經連到同一個 COM port
+
+先把 monitor 或舊程式關掉再重跑。
+
+### 看不到 `CSI_DATA`
+
+請依序檢查：
+
+- ESP32 韌體是否真的燒錄成功
+- Wi-Fi 名稱和密碼是否正確
+- 板子是否真的連上 AP
+- `idf.py monitor -b 921600` 下是否能看到 `CSI_DATA`
+
+### 基線初始化很慢
+
+這通常不是程式壞掉，而是：
+
+- 空間內還有人在移動
+- 板子或天線位置剛剛被碰到
+- 無線環境太不穩定
+
+先保持環境靜止，再重新執行。
+
+### 畫面打得開，但圖不更新
+
+請檢查：
+
+- ESP32 序列資料是否還在持續輸出
+- `data/` 內的 log 是否持續增加
+- Dash 模式不穩時，改用 `--static`
+
+## 10. 專案結構
 
 ```text
-WIFI-CSI/
+project_csi_demo/
 |-- main.py
 |-- csi_main.py
 |-- environment.yml
@@ -193,12 +334,18 @@ WIFI-CSI/
 |-- docs/
 |   `-- esp32_csi_flash_guide.md
 |-- data/
-|   `-- .gitkeep
 `-- src/
-    |-- __init__.py
     |-- config.py
     |-- csi_3d_display.py
     |-- esp32_csi_reader.py
     |-- motion_detector.py
     `-- wifi_scanner.py
 ```
+
+## 11. 建議課堂說法
+
+如果你要在課堂上用一句話介紹這個系統，可以直接這樣講：
+
+> 我們不是在「看見人體影像」，而是在觀察人體進入無線通道後，對 Wi-Fi CSI 造成的可視化擾動。
+
+這句話可以幫學生避免把 CSI 誤解成攝影機或雷達影像。
