@@ -13,15 +13,21 @@ CSI 三圖視覺化介面。
 
 from __future__ import annotations
 
+import csv
+import json
 import os
 import threading
 import time
 import webbrowser
 from dataclasses import dataclass
+from datetime import datetime
+from functools import partial
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 
 import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+from plotly.utils import PlotlyJSONEncoder
 
 from src.esp32_csi_reader import CSISource, CSIFrame, SceneSnapshot
 from src.motion_detector import MotionDetector, MotionState
@@ -31,7 +37,12 @@ from src.wifi_scanner import WiFiScanner
 SIGNED_SUBCARRIERS = np.array(list(range(-26, 0)) + list(range(1, 27)), dtype=np.int32)
 SUBCARRIER_TICKS = [-26, -20, -15, -10, -5, -1, 1, 5, 10, 15, 20, 26]
 
-DEFAULT_FIGURE_HEIGHT = 920
+APP_TITLE = "ESP32 CSI Visualizer"
+STATIC_HTML_NAME = "csi_scene_delta.html"
+STATIC_JSON_NAME = "csi_scene_delta.json"
+DEFAULT_LOG_STEM = "csi_runtime_log"
+
+DEFAULT_FIGURE_HEIGHT = 780
 DEFAULT_CLOUD_Z_MAX = 1.10
 DEFAULT_PROFILE_Y_MAX = 1.10
 DEFAULT_DELTA_Y_MAX = 0.28
@@ -224,10 +235,14 @@ def _compute_spectrogram(
     return np.array(centers, dtype=np.float64), filtered_freq_axis, spectrogram
 
 
+def _compute_sti_matrix(display_matrix: np.ndarray) -> np.ndarray:
+    """Build a time-vs-subcarrier heatmap for the STI panel."""
+    return display_matrix.T
+
+
 def _estimate_targets(
     amplitude_matrix: np.ndarray,
     display_matrix: np.ndarray,
-    spectrogram: np.ndarray | None,
     snapshot: SceneSnapshot,
 ) -> tuple[float, float, float, float]:
     """估計當前畫面該往哪個尺度靠近。"""
@@ -246,13 +261,10 @@ def _estimate_targets(
     else:
         delta_target = DEFAULT_DELTA_Y_MAX
 
-    if spectrogram is not None:
-        spectrogram_target = max(
-            DEFAULT_SPECTROGRAM_Z_MAX,
-            float(np.percentile(spectrogram, 99) * 1.10),
-        )
-    else:
-        spectrogram_target = DEFAULT_SPECTROGRAM_Z_MAX
+    spectrogram_target = max(
+        DEFAULT_SPECTROGRAM_Z_MAX,
+        float(np.percentile(display_matrix, 99) * 1.10),
+    )
 
     return cloud_target, profile_target, delta_target, spectrogram_target
 
@@ -445,13 +457,16 @@ def _add_profile_panel(fig: go.Figure, snapshot: SceneSnapshot) -> None:
         )
 
 
-def _add_spectrogram_panel(
+def _add_sti_panel(
     fig: go.Figure,
-    spectrogram_result: tuple[np.ndarray, np.ndarray, np.ndarray] | None,
+    time_axis: np.ndarray,
+    sti_matrix: np.ndarray,
+    color_title: str,
+    color_scale: list[list[float]],
     scales: DisplayScales,
 ) -> None:
     """加入右下 STFT Spectrogram。"""
-    if spectrogram_result is None:
+    if sti_matrix.size == 0:
         fig.add_annotation(
             text="需要更多連續 CSI 幀才能估算 STFT Spectrogram",
             x=0.79,
@@ -489,6 +504,58 @@ def _add_spectrogram_panel(
                 "能量 %{z:.3f}<extra></extra>"
             ),
             name="STFT Spectrogram",
+        ),
+        row=2,
+        col=2,
+    )
+
+
+def _add_sti_heatmap_panel(
+    fig: go.Figure,
+    time_axis: np.ndarray,
+    sti_matrix: np.ndarray,
+    color_title: str,
+    color_scale: list[list[float]],
+    scales: DisplayScales,
+) -> None:
+    """Add the STI heatmap used by the live dashboard."""
+    if sti_matrix.size == 0:
+        fig.add_annotation(
+            text="Waiting for enough CSI frames to build STI",
+            x=0.79,
+            y=0.18,
+            xref="paper",
+            yref="paper",
+            showarrow=False,
+            font=dict(size=12, color="#6f859b"),
+        )
+        return
+
+    fig.add_trace(
+        go.Heatmap(
+            x=time_axis,
+            y=SIGNED_SUBCARRIERS,
+            z=sti_matrix,
+            colorscale=color_scale,
+            zmin=0.0,
+            zmax=scales.spectrogram_z_max,
+            zsmooth="best",
+            colorbar=dict(
+                title=dict(text=color_title, font=dict(color="#dbe7f3", size=12)),
+                tickfont=dict(color="#8aa0b7", size=10),
+                bgcolor="rgba(8,17,31,0.84)",
+                bordercolor="#203247",
+                borderwidth=1,
+                len=0.28,
+                x=1.01,
+                y=0.18,
+            ),
+            hovertemplate=(
+                "Time %{x:.2f}s<br>"
+                "Subcarrier %{y}<br>"
+                "Value %{z:.3f}<extra></extra>"
+            ),
+            name="STI Heatmap",
         ),
         row=2,
         col=2,
@@ -661,6 +728,221 @@ def build_figure(
     return fig
 
 
+def build_empty_sti_figure(message: str, scales: DisplayScales) -> go.Figure:
+    """Build an empty placeholder figure that matches the STI layout."""
+    fig = make_subplots(
+        rows=2,
+        cols=2,
+        specs=[
+            [{"type": "scene", "rowspan": 2}, {"type": "xy", "secondary_y": True}],
+            [None, {"type": "heatmap"}],
+        ],
+        column_widths=[0.62, 0.38],
+        row_heights=[0.46, 0.54],
+        horizontal_spacing=0.06,
+        vertical_spacing=0.10,
+        subplot_titles=("3D CSI Point Cloud", "Subcarrier Profile", "STI Heatmap"),
+    )
+    fig.update_layout(
+        paper_bgcolor="#08111f",
+        plot_bgcolor="#08111f",
+        font=dict(family="Microsoft JhengHei, sans-serif", color="#dbe7f3"),
+        height=scales.figure_height,
+        margin=dict(l=18, r=18, t=72, b=34),
+        title=dict(text=message, x=0.5, xanchor="center"),
+        uirevision="csi-layout-static",
+    )
+    fig.add_annotation(
+        text="Waiting for CSI frames...",
+        x=0.20,
+        y=0.54,
+        xref="paper",
+        yref="paper",
+        showarrow=False,
+        font=dict(size=18, color="#8aa0b7"),
+    )
+    fig.add_annotation(
+        text="Top-right panel shows baseline, live profile, delta and silhouette.",
+        x=0.79,
+        y=0.66,
+        xref="paper",
+        yref="paper",
+        showarrow=False,
+        font=dict(size=12, color="#6f859b"),
+    )
+    fig.add_annotation(
+        text="Bottom-right panel switches to STI instead of Doppler/STFT.",
+        x=0.79,
+        y=0.24,
+        xref="paper",
+        yref="paper",
+        showarrow=False,
+        font=dict(size=12, color="#6f859b"),
+    )
+    return fig
+
+
+def build_sti_figure(
+    csi_source: CSISource,
+    detector: MotionDetector,
+    max_time_frames: int,
+    scales: DisplayScales,
+) -> go.Figure:
+    """Build the live figure with an STI heatmap instead of the Doppler panel."""
+    frames = csi_source.get_latest_frames(max_time_frames)
+    snapshot = csi_source.get_scene_snapshot()
+
+    if len(frames) < 2:
+        return build_empty_sti_figure("Waiting for CSI frames...", scales)
+
+    time_axis, amplitude_matrix = _prepare_frame_arrays(frames)
+    display_matrix, color_title, color_scale = _compute_display_matrix(amplitude_matrix, snapshot)
+    sti_matrix = _compute_sti_matrix(display_matrix)
+
+    fig = make_subplots(
+        rows=2,
+        cols=2,
+        specs=[
+            [{"type": "scene", "rowspan": 2}, {"type": "xy", "secondary_y": True}],
+            [None, {"type": "heatmap"}],
+        ],
+        column_widths=[0.62, 0.38],
+        row_heights=[0.46, 0.54],
+        horizontal_spacing=0.06,
+        vertical_spacing=0.10,
+        subplot_titles=("3D CSI Point Cloud", "Subcarrier Profile", "STI Heatmap"),
+    )
+
+    _add_cloud_panel(
+        fig,
+        time_axis,
+        amplitude_matrix,
+        display_matrix,
+        color_title,
+        color_scale,
+        snapshot,
+        scales,
+    )
+    _add_profile_panel(fig, snapshot)
+    _add_sti_heatmap_panel(fig, time_axis, sti_matrix, color_title, color_scale, scales)
+
+    latest_frame = frames[-1]
+    metric_text = (
+        f"RSSI {latest_frame.rssi_dbm:.0f} dBm | "
+        f"Motion energy {snapshot.motion_energy:.3f} | "
+        f"Foreground {snapshot.foreground_ratio:.0%} | "
+        f"Peak delta {snapshot.peak_delta:.3f}"
+    )
+
+    max_time = max(2.0, float(time_axis.max()))
+    fig.update_layout(
+        paper_bgcolor="#08111f",
+        plot_bgcolor="#08111f",
+        font=dict(family="Microsoft JhengHei, sans-serif", color="#dbe7f3"),
+        height=scales.figure_height,
+        margin=dict(l=18, r=18, t=72, b=34),
+        title=dict(text=f"<b>{APP_TITLE}</b>", x=0.5, xanchor="center"),
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.01,
+            xanchor="center",
+            x=0.5,
+            bgcolor="rgba(8,17,31,0.72)",
+            bordercolor="#203247",
+            borderwidth=1,
+        ),
+        uirevision="csi-layout-static",
+    )
+    fig.add_annotation(
+        text=metric_text,
+        showarrow=False,
+        x=0.5,
+        y=-0.05,
+        xref="paper",
+        yref="paper",
+        xanchor="center",
+        font=dict(size=11, color="#90a7bd"),
+    )
+
+    fig.update_scenes(
+        xaxis=dict(
+            title="Signed subcarrier",
+            backgroundcolor="#0b1626",
+            gridcolor="#203247",
+            showbackground=True,
+            tickmode="array",
+            tickvals=SUBCARRIER_TICKS,
+            range=[-27, 27],
+        ),
+        yaxis=dict(
+            title="Time (s)",
+            backgroundcolor="#0b1626",
+            gridcolor="#203247",
+            showbackground=True,
+            range=[0.0, max_time],
+        ),
+        zaxis=dict(
+            title="Amplitude",
+            backgroundcolor="#0b1626",
+            gridcolor="#203247",
+            showbackground=True,
+            range=[0, scales.cloud_z_max],
+        ),
+        camera=dict(eye=dict(x=1.55, y=-1.85, z=0.85)),
+        aspectratio=dict(x=1.35, y=2.0, z=0.8),
+        uirevision="csi-scene-static",
+    )
+
+    fig.update_xaxes(
+        title_text="Signed subcarrier",
+        tickmode="array",
+        tickvals=SUBCARRIER_TICKS,
+        gridcolor="#203247",
+        zerolinecolor="#203247",
+        row=1,
+        col=2,
+    )
+    fig.update_yaxes(
+        title_text="Amplitude",
+        gridcolor="#203247",
+        zerolinecolor="#203247",
+        range=[0, scales.profile_y_max],
+        row=1,
+        col=2,
+        secondary_y=False,
+    )
+    fig.update_yaxes(
+        title_text="Delta / silhouette",
+        gridcolor="#203247",
+        zerolinecolor="#203247",
+        range=[0, scales.delta_y_max],
+        row=1,
+        col=2,
+        secondary_y=True,
+    )
+    fig.update_xaxes(
+        title_text="Time (s)",
+        gridcolor="#203247",
+        zerolinecolor="#203247",
+        range=[0.0, max_time],
+        row=2,
+        col=2,
+    )
+    fig.update_yaxes(
+        title_text="Signed subcarrier",
+        tickmode="array",
+        tickvals=SUBCARRIER_TICKS,
+        gridcolor="#203247",
+        zerolinecolor="#203247",
+        range=[-27, 27],
+        row=2,
+        col=2,
+    )
+
+    return fig
+
+
 class CSI3DDisplay:
     """CSI 視覺化控制器，支援 Dash 即時模式與靜態 HTML 模式。"""
 
@@ -669,8 +951,9 @@ class CSI3DDisplay:
         scanner: WiFiScanner,
         detector: MotionDetector,
         csi_source: CSISource,
-        update_interval_ms: int = 1500,
+        update_interval_ms: int = 250,
         max_time_frames: int = 80,
+        log_path: str | None = None,
     ):
         self.scanner = scanner
         self.detector = detector
@@ -678,6 +961,10 @@ class CSI3DDisplay:
         self.update_interval_ms = update_interval_ms
         self.max_time_frames = max_time_frames
         self._scales = DisplayScales()
+        self._log_lock = threading.Lock()
+        self._log_started_at = time.time()
+        self.log_path = _resolve_log_path(log_path)
+        _initialize_log_file(self)
 
     def _refresh_scales(self) -> None:
         """根據目前資料更新顯示尺度，但以緩慢方式更新。"""
@@ -686,15 +973,12 @@ class CSI3DDisplay:
         if len(frames) < 2:
             return
 
-        time_axis, amplitude_matrix = _prepare_frame_arrays(frames)
+        _, amplitude_matrix = _prepare_frame_arrays(frames)
         display_matrix, _, _ = _compute_display_matrix(amplitude_matrix, snapshot)
-        spectrogram_result = _compute_spectrogram(time_axis, amplitude_matrix, snapshot)
-        spectrogram = spectrogram_result[2] if spectrogram_result is not None else None
 
         cloud_target, profile_target, delta_target, spectrogram_target = _estimate_targets(
             amplitude_matrix,
             display_matrix,
-            spectrogram,
             snapshot,
         )
 
@@ -722,7 +1006,7 @@ class CSI3DDisplay:
     def _build_current_figure(self) -> go.Figure:
         """更新尺度後建立目前畫面。"""
         self._refresh_scales()
-        return build_figure(
+        return build_sti_figure(
             self.csi_source,
             self.detector,
             self.max_time_frames,
@@ -973,3 +1257,428 @@ class CSI3DDisplay:
     </div>
 </body>
 </html>"""
+
+
+def _resolve_log_path(log_path: str | None) -> str:
+    """Resolve the CSV log path for dashboard refresh snapshots."""
+    if log_path:
+        resolved = os.path.abspath(log_path)
+    else:
+        data_dir = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "data",
+        )
+        log_name = f"{DEFAULT_LOG_STEM}_{datetime.now():%Y%m%d_%H%M%S}.csv"
+        resolved = os.path.join(data_dir, log_name)
+
+    os.makedirs(os.path.dirname(resolved), exist_ok=True)
+    return resolved
+
+
+def _initialize_log_file(display: CSI3DDisplay) -> None:
+    """Create the CSV log file with a stable header."""
+    with display._log_lock:
+        with open(display.log_path, "w", newline="", encoding="utf-8") as handle:
+            writer = csv.writer(handle)
+            writer.writerow(
+                [
+                    "logged_at",
+                    "refresh_index",
+                    "uptime_seconds",
+                    "frame_count",
+                    "time_window_seconds",
+                    "latest_frame_timestamp",
+                    "rssi_dbm",
+                    "motion_state",
+                    "status_text",
+                    "is_calibrated",
+                    "calibration_progress",
+                    "motion_energy",
+                    "foreground_ratio",
+                    "peak_delta",
+                ]
+            )
+
+
+def _append_refresh_log(
+    display: CSI3DDisplay,
+    refresh_index: int,
+    frame_count: int,
+    time_window_seconds: float,
+    latest_frame_timestamp: str,
+    rssi_dbm: str,
+    motion_state: str,
+    status_text: str,
+    snapshot: SceneSnapshot,
+) -> None:
+    """Append one dashboard refresh snapshot to the CSV log."""
+    with display._log_lock:
+        with open(display.log_path, "a", newline="", encoding="utf-8") as handle:
+            writer = csv.writer(handle)
+            writer.writerow(
+                [
+                    datetime.now().isoformat(timespec="seconds"),
+                    refresh_index,
+                    f"{time.time() - display._log_started_at:.3f}",
+                    frame_count,
+                    f"{time_window_seconds:.3f}",
+                    latest_frame_timestamp,
+                    rssi_dbm,
+                    motion_state,
+                    status_text,
+                    int(snapshot.is_calibrated),
+                    f"{snapshot.calibration_progress:.4f}",
+                    f"{snapshot.motion_energy:.6f}",
+                    f"{snapshot.foreground_ratio:.6f}",
+                    f"{snapshot.peak_delta:.6f}",
+                ]
+            )
+
+
+def _build_live_payload(display: CSI3DDisplay, n_intervals: int) -> dict:
+    """Collect the latest figure and UI metadata for Dash/static rendering."""
+    figure = display._build_current_figure()
+    frames = display.csi_source.get_latest_frames(display.max_time_frames)
+    snapshot = display.csi_source.get_scene_snapshot()
+    status_text, status_color = _build_status(snapshot, display.detector)
+    latest_frame = frames[-1] if frames else None
+    time_window_seconds = frames[-1].timestamp - frames[0].timestamp if len(frames) >= 2 else 0.0
+    latest_frame_timestamp = (
+        datetime.fromtimestamp(latest_frame.timestamp).isoformat(timespec="milliseconds")
+        if latest_frame is not None
+        else ""
+    )
+    rssi_dbm = f"{latest_frame.rssi_dbm:.2f}" if latest_frame is not None else ""
+    motion_state = getattr(display.detector.state, "name", str(display.detector.state))
+    update_info = (
+        f"Refresh #{n_intervals} | Interval {display.update_interval_ms} ms | "
+        f"Figure height {display._scales.figure_height}px"
+    )
+    _append_refresh_log(
+        display,
+        refresh_index=n_intervals,
+        frame_count=len(frames),
+        time_window_seconds=time_window_seconds,
+        latest_frame_timestamp=latest_frame_timestamp,
+        rssi_dbm=rssi_dbm,
+        motion_state=motion_state,
+        status_text=status_text,
+        snapshot=snapshot,
+    )
+    return {
+        "figure": figure.to_plotly_json(),
+        "status_text": status_text,
+        "status_color": status_color,
+        "update_info": update_info,
+        "config": {"displaylogo": False, "responsive": True},
+    }
+
+
+def _build_static_shell_html(display: CSI3DDisplay) -> str:
+    """Build the static HTML shell that updates the figure in place."""
+    return f"""<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{APP_TITLE}</title>
+    <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+    <style>
+        html, body {{
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            background: #08111f;
+            color: #dbe7f3;
+        }}
+        * {{
+            box-sizing: border-box;
+        }}
+        body {{
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            font-family: "Microsoft JhengHei", sans-serif;
+        }}
+        .header {{
+            padding: 12px 24px;
+            background: linear-gradient(135deg, #08111f 0%, #132238 100%);
+            border-bottom: 1px solid #203247;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 12px;
+            flex-wrap: wrap;
+        }}
+        .header h1 {{
+            margin: 0;
+            font-size: 20px;
+        }}
+        #status-text {{
+            padding: 6px 12px;
+            border-radius: 999px;
+            border: 1px solid #203247;
+            background: rgba(11, 22, 38, 0.88);
+            color: #90a7bd;
+            font-size: 12px;
+            white-space: nowrap;
+        }}
+        .content {{
+            flex: 1 1 auto;
+            min-height: 0;
+            width: 100%;
+            overflow: hidden;
+        }}
+        #plot {{
+            width: 100%;
+            height: 100%;
+        }}
+        .footer {{
+            padding: 8px 24px;
+            border-top: 1px solid #203247;
+            color: #90a7bd;
+            font-size: 11px;
+            background: #0b1626;
+        }}
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>{APP_TITLE}</h1>
+        <div id="status-text">Connecting...</div>
+    </div>
+    <div class="content">
+        <div id="plot"></div>
+    </div>
+    <div id="update-info" class="footer">Waiting for first frame...</div>
+    <script>
+        const refreshMs = {display.update_interval_ms};
+        let initialized = false;
+        const plotElement = document.getElementById("plot");
+        const statusElement = document.getElementById("status-text");
+        const infoElement = document.getElementById("update-info");
+
+        async function refreshFigure() {{
+            try {{
+                const response = await fetch("./{STATIC_JSON_NAME}?ts=" + Date.now(), {{ cache: "no-store" }});
+                if (!response.ok) {{
+                    throw new Error("HTTP " + response.status);
+                }}
+
+                const payload = await response.json();
+                statusElement.textContent = payload.status_text;
+                statusElement.style.color = payload.status_color;
+                statusElement.style.borderColor = payload.status_color;
+                infoElement.textContent = payload.update_info;
+
+                if (!initialized) {{
+                    await Plotly.newPlot(plotElement, payload.figure.data, payload.figure.layout, payload.config);
+                    initialized = true;
+                }} else {{
+                    await Plotly.react(plotElement, payload.figure.data, payload.figure.layout, payload.config);
+                }}
+            }} catch (error) {{
+                infoElement.textContent = "Refresh error: " + error.message;
+            }}
+        }}
+
+        window.addEventListener("resize", () => {{
+            if (initialized) {{
+                Plotly.Plots.resize(plotElement);
+            }}
+        }});
+
+        refreshFigure();
+        setInterval(refreshFigure, refreshMs);
+    </script>
+</body>
+</html>"""
+
+
+def _start_static_http_server(directory: str) -> tuple[ThreadingHTTPServer, int]:
+    """Serve the generated static dashboard over HTTP so the browser can poll JSON."""
+
+    class QuietHandler(SimpleHTTPRequestHandler):
+        def log_message(self, format: str, *args) -> None:
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), partial(QuietHandler, directory=directory))
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server, server.server_port
+
+
+def _run_dash_live(display: CSI3DDisplay, port: int = 8050, debug: bool = False) -> None:
+    """Replacement Dash renderer with a stable layout and header status badge."""
+    try:
+        from dash import Dash, dcc, html
+        from dash.dependencies import Input, Output
+    except ImportError:
+        print("[WARN] Dash is not installed. Falling back to static mode.")
+        _run_static_live(display)
+        return
+
+    app = Dash(__name__, title=APP_TITLE)
+    app.index_string = """<!DOCTYPE html>
+<html lang="zh-Hant">
+    <head>
+        {%metas%}
+        <title>{%title%}</title>
+        {%favicon%}
+        {%css%}
+        <style>
+            html, body {
+                margin: 0;
+                padding: 0;
+                width: 100%;
+                height: 100%;
+                background: #08111f;
+                color: #dbe7f3;
+            }
+            * {
+                box-sizing: border-box;
+            }
+            body {
+                overflow: hidden;
+            }
+        </style>
+    </head>
+    <body>
+        {%app_entry%}
+        <footer>
+            {%config%}
+            {%scripts%}
+            {%renderer%}
+        </footer>
+    </body>
+</html>"""
+
+    app.layout = html.Div(
+        style={
+            "backgroundColor": "#08111f",
+            "height": "100vh",
+            "display": "flex",
+            "flexDirection": "column",
+            "overflow": "hidden",
+            "fontFamily": "Microsoft JhengHei, sans-serif",
+        },
+        children=[
+            html.Div(
+                style={
+                    "background": "linear-gradient(135deg, #08111f 0%, #132238 100%)",
+                    "padding": "12px 24px",
+                    "borderBottom": "1px solid #203247",
+                    "display": "flex",
+                    "justifyContent": "space-between",
+                    "alignItems": "center",
+                    "gap": "12px",
+                    "flexWrap": "wrap",
+                },
+                children=[
+                    html.Div(
+                        APP_TITLE,
+                        style={
+                            "fontSize": "18px",
+                            "fontWeight": "700",
+                            "color": "#dbe7f3",
+                        },
+                    ),
+                    html.Div(id="status-text"),
+                ],
+            ),
+            html.Div(
+                style={"flex": "1 1 auto", "minHeight": "0", "overflow": "hidden"},
+                children=[
+                    dcc.Graph(
+                        id="csi-figure",
+                        style={"height": "100%", "width": "100%", "margin": "0", "padding": "0"},
+                        config={"displaylogo": False, "responsive": True},
+                    )
+                ],
+            ),
+            html.Div(
+                id="update-info",
+                style={
+                    "padding": "8px 24px",
+                    "borderTop": "1px solid #203247",
+                    "fontSize": "11px",
+                    "color": "#90a7bd",
+                    "backgroundColor": "#0b1626",
+                },
+            ),
+            dcc.Interval(id="refresh-interval", interval=display.update_interval_ms, n_intervals=0),
+        ],
+    )
+
+    @app.callback(
+        Output("csi-figure", "figure"),
+        Output("status-text", "children"),
+        Output("update-info", "children"),
+        Input("refresh-interval", "n_intervals"),
+    )
+    def update_graph(n_intervals: int):
+        payload = _build_live_payload(display, n_intervals)
+        status_badge = html.Span(
+            payload["status_text"],
+            style={
+                "display": "inline-block",
+                "padding": "6px 12px",
+                "borderRadius": "999px",
+                "border": f"1px solid {payload['status_color']}",
+                "backgroundColor": "rgba(11,22,38,0.88)",
+                "color": payload["status_color"],
+                "fontSize": "12px",
+                "whiteSpace": "nowrap",
+            },
+        )
+        return payload["figure"], status_badge, payload["update_info"]
+
+    print(f"[WEB] Opening Dash dashboard at http://127.0.0.1:{port}")
+    threading.Timer(1.0, lambda: webbrowser.open(f"http://127.0.0.1:{port}")).start()
+    app.run(host="0.0.0.0", port=port, debug=debug)
+
+
+def _run_static_live(display: CSI3DDisplay) -> None:
+    """Replacement static renderer that updates Plotly in place without reloading the page."""
+    data_dir = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "data",
+    )
+    html_path = os.path.join(data_dir, STATIC_HTML_NAME)
+    json_path = os.path.join(data_dir, STATIC_JSON_NAME)
+    os.makedirs(data_dir, exist_ok=True)
+
+    payload = _build_live_payload(display, 0)
+    with open(html_path, "w", encoding="utf-8") as handle:
+        handle.write(_build_static_shell_html(display))
+    with open(json_path, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, ensure_ascii=False, cls=PlotlyJSONEncoder)
+
+    server, port = _start_static_http_server(data_dir)
+    url = f"http://127.0.0.1:{port}/{STATIC_HTML_NAME}"
+    print(f"[FILE] Serving static dashboard at {url}")
+    threading.Timer(1.0, lambda: webbrowser.open(url)).start()
+
+    tick = 0
+    try:
+        while True:
+            payload = _build_live_payload(display, tick)
+            with open(json_path, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle, ensure_ascii=False, cls=PlotlyJSONEncoder)
+
+            print(
+                f"\r[CSI] {payload['status_text']} | frames={len(display.csi_source.get_latest_frames())}",
+                end="",
+                flush=True,
+            )
+            tick += 1
+            time.sleep(display.update_interval_ms / 1000.0)
+    except KeyboardInterrupt:
+        print("\n[STOP] Static dashboard stopped.")
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+CSI3DDisplay.run_dash = _run_dash_live
+CSI3DDisplay.run_static = _run_static_live

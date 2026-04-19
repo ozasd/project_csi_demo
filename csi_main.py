@@ -47,7 +47,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--static", action="store_true", help="Write static HTML instead of Dash")
     parser.add_argument("--port", type=int, default=8050, help="Dash server port")
     parser.add_argument("--frames", type=int, default=80, help="Number of frames to retain in the time axis")
-    parser.add_argument("--refresh", type=int, default=1000, help="Display refresh interval in milliseconds")
+    parser.add_argument("--refresh", type=int, default=250, help="Display refresh interval in milliseconds")
+    parser.add_argument(
+        "--log-file",
+        help="CSV path for dashboard refresh logs (default: data/csi_runtime_log_YYYYMMDD_HHMMSS.csv)",
+    )
     parser.add_argument(
         "--baseline-frames",
         type=int,
@@ -87,6 +91,7 @@ def print_banner(args: argparse.Namespace) -> None:
         f"  Frames : {args.frames}\n"
         f"  Scene  : {args.baseline_frames} baseline frames\n"
         f"  Refresh: {args.refresh} ms\n"
+        f"  Log    : {args.log_file or 'data/csi_runtime_log_YYYYMMDD_HHMMSS.csv'}\n"
     )
 
 
@@ -97,7 +102,7 @@ def feed_loop(scanner: WiFiScanner, detector: MotionDetector) -> None:
         for sample in samples[last_index:]:
             detector.feed(sample)
         last_index = len(samples)
-        time.sleep(0.1)
+        time.sleep(0.05)
 
 
 def main() -> int:
@@ -188,7 +193,9 @@ def main() -> int:
         csi_source=csi_source,
         update_interval_ms=args.refresh,
         max_time_frames=args.frames,
+        log_path=args.log_file,
     )
+    print(f"[LOG] Saving refresh log to {display.log_path}")
 
     try:
         if args.static:

@@ -67,7 +67,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--static", action="store_true", help="Launch csi_main.py in static HTML mode")
     parser.add_argument("--port", type=int, default=8050, help="Dash server port")
     parser.add_argument("--frames", type=int, default=80, help="Frame history size")
-    parser.add_argument("--refresh", type=int, default=1000, help="Refresh interval in milliseconds")
+    parser.add_argument("--refresh", type=int, default=250, help="Refresh interval in milliseconds")
+    parser.add_argument("--log-file", help="CSV path for dashboard refresh logs")
     parser.add_argument("--baseline-frames", type=int, default=80, help="Static scene baseline frame count")
     parser.add_argument("--baseline-timeout", type=int, default=30, help="Static scene baseline timeout in seconds")
     parser.add_argument("--skip-setup", action="store_true", help="Skip Wi-Fi setup and go straight to csi_main.py")
@@ -149,6 +150,8 @@ def launch_visualizer(args: argparse.Namespace) -> "NoReturn":
         "--baseline-timeout",
         str(args.baseline_timeout),
     ]
+    if args.log_file:
+        argv.extend(["--log-file", args.log_file])
     if args.static:
         argv.append("--static")
     print("[RUN] Launching csi_main.py ...")

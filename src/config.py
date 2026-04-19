@@ -1,6 +1,6 @@
 """Runtime configuration for the ESP32 CSI visualizer."""
 
-POLL_INTERVAL = 0.1
+POLL_INTERVAL = 0.05
 SCAN_INTERVAL = 10
 
 MOTION_THRESHOLD_STD = 0.3
