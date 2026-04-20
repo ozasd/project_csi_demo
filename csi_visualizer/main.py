@@ -15,6 +15,7 @@ import argparse
 import os
 import sys
 import time
+from pathlib import Path
 
 
 if sys.platform == "win32":
@@ -23,6 +24,31 @@ if sys.platform == "win32":
         sys.stderr.reconfigure(encoding="utf-8", errors="replace")
     except Exception:
         pass
+
+
+ENV_FILE = Path(__file__).resolve().parent.parent / ".env"
+WIFI_DEFAULT_SSID_ENV = "WIFI_DEFAULT_SSID"
+WIFI_DEFAULT_PASSWORD_ENV = "WIFI_DEFAULT_PASSWORD"
+
+
+def load_env_file(path: Path = ENV_FILE) -> None:
+    if not path.is_file():
+        return
+
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if not key or key in os.environ:
+            continue
+
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
+            value = value[1:-1]
+        os.environ[key] = value
 
 
 def maybe_reexec_into_wifi_env() -> None:
@@ -55,13 +81,21 @@ def parse_args() -> argparse.Namespace:
             "  python main.py\n"
             "  python main.py --com COM4\n"
             "  python main.py --ssid \"Tracy 2\" --password a7802568\n"
-            "  python main.py --static"
+            "  python main.py --static\n\n"
+            "Environment defaults:\n"
+            "  .env -> WIFI_DEFAULT_SSID / WIFI_DEFAULT_PASSWORD"
         ),
     )
     parser.add_argument("--com", default="COM3", help="ESP32 serial port")
     parser.add_argument("--baud", type=int, default=921600, help="ESP32 serial baudrate")
-    parser.add_argument("--ssid", help="Wi-Fi SSID for non-interactive startup")
-    parser.add_argument("--password", help="Wi-Fi password for non-interactive startup")
+    parser.add_argument(
+        "--ssid",
+        help=f"Wi-Fi SSID for non-interactive startup (overrides {WIFI_DEFAULT_SSID_ENV})",
+    )
+    parser.add_argument(
+        "--password",
+        help=f"Wi-Fi password for non-interactive startup (overrides {WIFI_DEFAULT_PASSWORD_ENV})",
+    )
     parser.add_argument("--setup-timeout", type=int, default=20, help="Seconds to wait for prompt or CSI")
     parser.add_argument("--connect-timeout", type=int, default=30, help="Seconds to wait for CSI after sending Wi-Fi")
     parser.add_argument("--static", action="store_true", help="Launch csi_main.py in static HTML mode")
@@ -82,8 +116,25 @@ def format_wifi_line(ssid: str, password: str) -> str:
 
 
 def prompt_credentials(args: argparse.Namespace) -> tuple[str, str]:
-    ssid = args.ssid.strip() if args.ssid else input("Wi-Fi SSID: ").strip()
-    password = args.password if args.password is not None else input("Wi-Fi password (blank for open network): ")
+    env_ssid = os.environ.get(WIFI_DEFAULT_SSID_ENV)
+    env_password = os.environ.get(WIFI_DEFAULT_PASSWORD_ENV)
+
+    if args.ssid:
+        ssid = args.ssid.strip()
+    elif env_ssid and env_ssid.strip():
+        ssid = env_ssid.strip()
+        print(f"[INIT] Using default Wi-Fi SSID from {WIFI_DEFAULT_SSID_ENV}.")
+    else:
+        ssid = input("Wi-Fi SSID: ").strip()
+
+    if args.password is not None:
+        password = args.password
+    elif env_password is not None:
+        password = env_password
+        print(f"[INIT] Using default Wi-Fi password from {WIFI_DEFAULT_PASSWORD_ENV}.")
+    else:
+        password = input("Wi-Fi password (blank for open network): ")
+
     if not ssid:
         raise ValueError("Wi-Fi SSID cannot be empty.")
     return ssid, password
@@ -160,6 +211,7 @@ def launch_visualizer(args: argparse.Namespace) -> "NoReturn":
 
 def main() -> int:
     maybe_reexec_into_wifi_env()
+    load_env_file()
     args = parse_args()
 
     if args.skip_setup:

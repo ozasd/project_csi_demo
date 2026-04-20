@@ -1,50 +1,62 @@
-# ESP32 CSI 教學版 README
+# ESP32 Wi-Fi CSI 專案
 
-這個專案用來示範一條完整流程：
+利用 ESP32 的 Wi-Fi CSI（Channel State Information）做兩件事：
 
-`ESP32 CSI -> Python 解析 -> 即時視覺化`
+| 子系統 | 目錄 | 說明 |
+|--------|------|------|
+| **CSI 3D 視覺化** | `csi_visualizer/` | 即時 3D 雲霧圖 + 子載波曲線 + STI 熱力圖 |
+| **跌倒偵測（含 GUI）** | `fall_detection/` | 即時偵測跌倒事件，tkinter 圖形介面 |
 
-目前專案重點不是做精準定位，而是把 ESP32 輸出的 `CSI_DATA` 轉成容易教學展示的畫面，讓學生可以直接看到：
+兩個系統各自獨立，都有自己的 `main.py`，啟動時自動讀取根目錄 `.env` 的 Wi-Fi 帳密。
 
-- 靜態背景和目前訊號的差異
-- 子載波隨時間的變化
-- 人體或物體移動時的 CSI 擾動
+---
 
-## 這個專案現在會顯示什麼
+## 專案結構
 
-目前 dashboard 版面是三個區塊：
+```
+project_csi_demo/
+├── .env                          # Wi-Fi 帳密（WIFI_DEFAULT_SSID / WIFI_DEFAULT_PASSWORD）
+├── environment.yml               # conda 環境定義
+├── data/                         # 執行時產生的記錄檔（共用）
+├── docs/
+│   └── esp32_csi_flash_guide.md  # ESP32 韌體燒錄教學
+│
+├── csi_visualizer/               # ── CSI 3D 視覺化 ──
+│   ├── main.py                   # 入口：ESP32 連線 → Wi-Fi → 啟動視覺化
+│   ├── csi_main.py               # Dash / 靜態 HTML 視覺化主程式
+│   └── src/
+│       ├── config.py
+│       ├── csi_3d_display.py     # 三區塊 dashboard（3D 雲霧、子載波、STI）
+│       ├── esp32_csi_reader.py   # ESP32 序列埠 CSI 讀取
+│       ├── motion_detector.py    # RSSI 動作偵測
+│       └── wifi_scanner.py       # Windows Wi-Fi 掃描
+│
+└── fall_detection/               # ── 跌倒偵測（GUI）──
+    ├── main.py                   # 入口：ESP32 連線 → Wi-Fi → 啟動 GUI
+    ├── gui.py                    # tkinter 圖形介面
+    └── src/
+        ├── config.py
+        ├── esp32_csi_reader.py   # ESP32 序列埠 CSI 讀取
+        ├── csi_reader.py         # CSI 讀取（即時 / CSV / 模擬）
+        ├── preprocessing.py      # 前處理（去雜訊、平滑、正規化）
+        ├── sti_analyzer.py       # STI 計算
+        ├── similarity_analyzer.py # 矩陣相似度分析
+        ├── event_detector.py     # 事件偵測（整合 STI + 相似度 + 持續時間）
+        └── alert_manager.py      # 告警（音效 + 記錄檔）
+```
 
-- 上方：`3D CSI 雲霧圖`
-- 左下：`子載波變化圖`
-- 右下：`STI Heatmap`
+---
 
-說明：
+## 環境建置
 
-- 只有上方 3D 雲霧圖保留 `基線差分` 色條。
-- 右下 STI heatmap 不再顯示自己的色條，避免教學畫面太亂。
-- 這裡的「輪廓」與「差分」都是 CSI 代理特徵，不是真正的相機輪廓或 3D 重建。
+### 需求
 
-## 專案流程
+- Windows 10 / 11
+- ESP32 開發板 + USB 線
+- 可供 ESP32 連線的 Wi-Fi AP
+- Conda（Anaconda 或 Miniconda）
 
-建議把整個系統理解成兩層：
-
-1. `main.py`
-作用：一鍵啟動。它會先打開序列埠、重啟 ESP32、等待 Wi-Fi 提示或 `CSI_DATA`，然後再接手啟動視覺化。
-
-2. `csi_main.py`
-作用：真正的 CSI 視覺化程式。它會讀取 ESP32 的 `CSI_DATA`，建立靜態場景基線，然後啟動 Dash 或靜態 HTML。
-
-## 環境需求
-
-- Windows 10 或 Windows 11
-- ESP32 開發板
-- USB 線
-- 一個可讓 ESP32 連上的 Wi-Fi AP
-- Conda
-
-## 1. 建立 Python 環境
-
-在 `cmd` 執行：
+### 安裝
 
 ```cmd
 cd /d C:\Users\ozasd\Documents\project_csi_demo
@@ -52,300 +64,172 @@ conda env create -f environment.yml
 conda activate wifi-csi
 ```
 
-如果你的 `cmd` 內找不到 `conda`，改用：
+> 找不到 `conda`？改用：`call C:\ProgramData\anaconda3\Scripts\activate.bat wifi-csi`
 
-```cmd
-call C:\ProgramData\anaconda3\Scripts\activate.bat wifi-csi
+### 設定 Wi-Fi
+
+在專案根目錄建立 `.env`，兩個子系統都會自動讀取：
+
+```
+WIFI_DEFAULT_SSID=你的WiFi名稱
+WIFI_DEFAULT_PASSWORD=你的WiFi密碼
 ```
 
-這個環境會安裝：
+---
 
-- `numpy`
-- `scipy`
-- `matplotlib`
-- `pandas`
-- `plotly`
-- `dash`
-- `pyserial`
-- `rich`
+## 快速開始
 
-## 2. 燒錄 ESP32 韌體
+### CSI 3D 視覺化
 
-本專案使用 ESP32 輸出的 `CSI_DATA` 當輸入，所以板子端必須先能正常輸出 CSI。
+```cmd
+cd csi_visualizer
+python main.py --com COM3
+```
 
-詳細燒錄步驟請看：
+| 指令 | 說明 |
+|------|------|
+| `python main.py --com COM3` | 標準啟動（Dash 即時更新） |
+| `python main.py --com COM3 --static` | 改用靜態 HTML |
+| `python main.py --com COM3 --ssid "名稱" --password 密碼` | 直接指定 Wi-Fi |
+| `python main.py --skip-setup` | 跳過 Wi-Fi 設定 |
+| `python csi_main.py --com COM3` | 直接啟動視覺化（不經 Wi-Fi 流程） |
 
-- [docs/esp32_csi_flash_guide.md](docs/esp32_csi_flash_guide.md)
+### 跌倒偵測
 
-如果你只想先確認韌體有沒有正常工作，可以先用：
+```cmd
+cd fall_detection
+python main.py --com COM3
+```
+
+| 指令 | 說明 |
+|------|------|
+| `python main.py --com COM3` | 連接 ESP32 啟動 GUI |
+| `python main.py --simulate` | 模擬模式（不需 ESP32） |
+| `python main.py --skip-setup` | 跳過 Wi-Fi 設定，直接開 GUI |
+| `python gui.py --simulate` | 直接開 GUI（模擬資料） |
+| `python gui.py --com COM3` | 直接開 GUI（即時資料） |
+
+---
+
+## ESP32 韌體
+
+板子端必須能輸出 `CSI_DATA`，燒錄步驟見 [docs/esp32_csi_flash_guide.md](docs/esp32_csi_flash_guide.md)。
+
+快速驗證韌體：
 
 ```cmd
 idf.py -p COM3 monitor -b 921600
 ```
 
-正常情況下，你應該會看到：
+正常會看到 `Please input ssid password:`，輸入 Wi-Fi 後開始出現 `CSI_DATA,...`。
 
-```text
-Please input ssid password:
+---
+
+## 跌倒偵測原理
+
+偵測分兩階段判斷：
+
+```
+CSI 資料 → 前處理 → 計算 STI
+                        │
+                  STI ≤ 0.22 → 正常（更新基線）
+                  STI > 0.22 → 計算 CSI 矩陣與跌倒模板的時序相似度
+                                    │
+                       ┌── 相似度 ≤ 0.65 → 偵測到動作
+                       └── 相似度 > 0.65 → 疑似跌倒，進入觀察期
+                                                │
+                                    振幅持續偏移（人倒在地上）
+                                    且持續 ≥ 5 秒 → 判定跌倒 → 告警
 ```
 
-輸入 Wi-Fi 後，之後應該開始持續出現：
+**相似度改進：** 使用「逐子載波時序相關」取代整矩陣展平相關，聚焦在每個子載波的時間變化型態（穩定→突變→新穩態），避免被靜態振幅 profile 主導。
 
-```text
-CSI_DATA,...
-```
+| 參數 | 預設 | 說明 |
+|------|------|------|
+| `--sti-threshold` | 0.22 | STI 門檻，越低越敏感 |
+| `--sim-threshold` | 0.65 | 時序相似度門檻，越低越容易觸發 |
+| `--duration-threshold` | 5.0 | 須持續幾秒才判定跌倒 |
 
-看到 `CSI_DATA` 代表板子端基本正常。
+告警記錄會寫入 `data/fall_alerts.jsonl`。
 
-## 3. 執行專案
+---
 
-### 建議方式：一鍵啟動
+## CSI 3D 視覺化畫面說明
 
-在 `cmd` 執行：
+三個區塊：
 
-```cmd
-cd /d C:\Users\ozasd\Documents\project_csi_demo
-conda activate wifi-csi
-python main.py --com COM3
-```
+| 區塊 | 座標 | 看什麼 |
+|------|------|--------|
+| **3D 雲霧圖**（上） | X=子載波, Y=時間, Z=振幅 | 顏色越亮 = 和靜態基線差異越大 |
+| **子載波曲線**（左下） | X=子載波, Y=振幅 | 基線 vs 即時 vs 差分 |
+| **STI 熱力圖**（右下） | X=時間, Y=子載波 | 觀察變化是持續還是瞬間 |
 
-這是最適合教學時使用的入口。它會自動做下面幾件事：
+> 這是教學視覺化，不是幾何空間重建。我們看的是人體對 Wi-Fi 訊號造成的擾動，不是影像。
 
-- 開啟 ESP32 的序列埠
-- 重啟 ESP32
-- 等待 Wi-Fi 輸入提示或直接等到 `CSI_DATA`
-- 視情況輸入 Wi-Fi
-- 啟動視覺化
+---
 
-### 直接指定 Wi-Fi
+## 重要參數一覽
 
-如果不想在互動式提示中輸入：
+### csi_visualizer/main.py
 
-```cmd
-python main.py --com COM3 --ssid "Your WiFi Name" --password your_password
-```
+| 參數 | 預設 | 說明 |
+|------|------|------|
+| `--com` | COM3 | ESP32 序列埠 |
+| `--baud` | 921600 | 鮑率 |
+| `--ssid` | .env | Wi-Fi SSID |
+| `--password` | .env | Wi-Fi 密碼 |
+| `--static` | 否 | 靜態 HTML 模式 |
+| `--frames` | 80 | 時間軸保留幀數 |
+| `--refresh` | 250 | 畫面更新間隔 (ms) |
+| `--baseline-frames` | 80 | 基線初始化所需 CSI 幀數 |
+| `--baseline-timeout` | 30 | 基線初始化逾時 (秒) |
+| `--skip-setup` | 否 | 跳過 Wi-Fi 設定 |
 
-### 靜態 HTML 模式
+### fall_detection/main.py
 
-如果 Dash 在某台教室電腦上不穩，可以改用：
+| 參數 | 預設 | 說明 |
+|------|------|------|
+| `--com` | COM3 | ESP32 序列埠 |
+| `--baud` | 921600 | 鮑率 |
+| `--simulate` | 否 | 用模擬資料（不需 ESP32） |
+| `--skip-setup` | 否 | 跳過 Wi-Fi 設定 |
+| `--sti-threshold` | 0.22 | STI 門檻 |
+| `--sim-threshold` | 0.65 | 時序相似度門檻 |
+| `--duration-threshold` | 5.0 | 持續時間門檻 (秒) |
 
-```cmd
-python main.py --com COM3 --static
-```
+---
 
-這個模式會把畫面寫到 `data/`，並用本機 HTTP 服務更新圖表。
+## 輸出檔案
 
-### 直接啟動視覺化程式
+所有輸出都在 `data/`：
 
-如果你的 ESP32 已經在穩定輸出 `CSI_DATA`，也可以直接略過 Wi-Fi 設定階段：
+| 檔案 | 來源 | 說明 |
+|------|------|------|
+| `csi_runtime_log_*.csv` | 視覺化 | dashboard 每次刷新的狀態 |
+| `fall_alerts.jsonl` | 跌倒偵測 | 告警記錄 |
+| `csi_scene_delta.html` | 視覺化（靜態模式） | 靜態場景快照 |
 
-```cmd
-python csi_main.py --com COM3
-```
+---
 
-## 4. 常用指令
+## 常見問題
 
-```cmd
-python main.py --com COM3
-python main.py --com COM4
-python main.py --com COM3 --static
-python main.py --com COM3 --baseline-frames 120
-python main.py --com COM3 --baseline-timeout 40
-python main.py --com COM3 --frames 120 --refresh 200
-python main.py --com COM3 --ssid "Your WiFi Name" --password your_password
-python csi_main.py --com COM3
-```
+| 問題 | 解法 |
+|------|------|
+| `conda` 找不到 | `call C:\ProgramData\anaconda3\Scripts\activate.bat wifi-csi` |
+| `pyserial` 缺少 | 沒進 conda 環境，先 `conda activate wifi-csi` |
+| `COM3 is busy` | 關掉 `idf.py monitor` 或其他佔用序列埠的程式 |
+| 看不到 `CSI_DATA` | 確認韌體燒錄成功、Wi-Fi 帳密正確、板子已連上 AP |
+| 基線初始化很慢 | 環境靜止不動，不要移動設備 |
+| 畫面不更新 | 確認 ESP32 仍在輸出資料，Dash 不穩時改用 `--static` |
 
-## 5. 重要參數
+---
 
-### `main.py`
+## 教學建議
 
-- `--com`
-作用：ESP32 的序列埠，預設是 `COM3`
+1. 環境靜止 → 等基線初始化完成
+2. 看靜止畫面 → 說明這是背景參考
+3. 有人走進或揮手 → 觀察 3D 雲霧圖與子載波變化
+4. 人停下來 → 觀察系統回穩
+5. 比較不同動作幅度
 
-- `--baud`
-作用：ESP32 鮑率，預設是 `921600`
-
-- `--ssid`
-作用：直接提供 Wi-Fi 名稱，避免互動輸入
-
-- `--password`
-作用：直接提供 Wi-Fi 密碼
-
-- `--static`
-作用：改用靜態 HTML 模式，不走 Dash
-
-- `--frames`
-作用：時間軸保留的 CSI 幀數，預設 `80`
-
-- `--refresh`
-作用：畫面更新間隔，單位毫秒，預設 `250`
-
-- `--baseline-frames`
-作用：建立靜態場景基線時需要多少筆 CSI，預設 `80`
-
-- `--baseline-timeout`
-作用：等待靜態場景初始化完成的秒數，預設 `30`
-
-- `--skip-setup`
-作用：略過 Wi-Fi 初始化，直接跳到 `csi_main.py`
-
-### `csi_main.py`
-
-除了上面幾個常用參數，還支援：
-
-- `--threshold`
-作用：RSSI 標準差門檻，預設 `0.3`
-
-- `--composite-threshold`
-作用：複合運動門檻，預設 `1.2`
-
-## 6. 教學展示建議流程
-
-下面這一套流程最容易讓學生看懂：
-
-1. 先保持空間完全不動，等待基線初始化完成。
-2. 讓學生先看靜止畫面，說明這是系統的背景參考。
-3. 讓一個人走進畫面或揮手，觀察 3D 雲霧圖與子載波圖變化。
-4. 再讓人停下來，觀察系統如何慢慢回到穩定狀態。
-5. 比較不同動作幅度，例如揮手、走動、靠近天線。
-
-教學提醒：
-
-- 基線初始化期間，空間越安靜越好。
-- ESP32、人體、路由器位置只要改動太多，就要重新建立基線。
-- CSI 對環境非常敏感，教學時請避免一邊講解一邊大量移動設備。
-
-## 7. 畫面解讀
-
-### 上方：3D CSI 雲霧圖
-
-- X 軸：signed subcarrier
-- Y 軸：time
-- Z 軸：amplitude
-- 顏色：相對於基線的差分強度
-
-解讀方式：
-
-- 顏色越亮，表示和靜態背景差異越大。
-- 雲霧越分散或越厚，通常代表空間內擾動變多。
-- 這是教學視覺化，不是幾何意義上的真實空間重建。
-
-### 左下：子載波變化圖
-
-會同時顯示幾種曲線：
-
-- 基線 profile
-- 目前 profile
-- 差分 profile
-- silhouette 代理
-
-解讀方式：
-
-- 基線和目前值差越大，代表環境擾動越明顯。
-- 差分 profile 可以幫助學生理解「哪些子載波變化最大」。
-
-### 右下：STI Heatmap
-
-- 橫軸：time
-- 縱軸：signed subcarrier
-- 顏色：各時間點與各子載波的 CSI 變化強度
-
-解讀方式：
-
-- 適合觀察變化是持續發生，還是只在某些時間點突然出現。
-- 目前這張圖不顯示獨立色條，避免和上方雲霧圖的 UI 重複。
-
-## 8. 輸出檔案
-
-執行期間會在 `data/` 產生紀錄檔。
-
-- `csi_runtime_log_YYYYMMDD_HHMMSS.csv`
-用途：記錄每次 dashboard refresh 的狀態與統計值
-
-如果使用 `--static`，也會產生：
-
-- `csi_scene_delta.html`
-- `csi_scene_delta.json`
-
-## 9. 常見問題
-
-### `conda` 找不到
-
-請在 `cmd` 先執行：
-
-```cmd
-call C:\ProgramData\anaconda3\Scripts\activate.bat wifi-csi
-```
-
-### `pyserial` 缺少
-
-代表你很可能沒有進入正確的 conda 環境。請先確認：
-
-```cmd
-conda activate wifi-csi
-python main.py --com COM3
-```
-
-### `COM3 is busy`
-
-代表序列埠已被其他程式佔用。最常見原因是：
-
-- 你還開著 `idf.py monitor`
-- 另一個 Python 程式已經連到同一個 COM port
-
-先把 monitor 或舊程式關掉再重跑。
-
-### 看不到 `CSI_DATA`
-
-請依序檢查：
-
-- ESP32 韌體是否真的燒錄成功
-- Wi-Fi 名稱和密碼是否正確
-- 板子是否真的連上 AP
-- `idf.py monitor -b 921600` 下是否能看到 `CSI_DATA`
-
-### 基線初始化很慢
-
-這通常不是程式壞掉，而是：
-
-- 空間內還有人在移動
-- 板子或天線位置剛剛被碰到
-- 無線環境太不穩定
-
-先保持環境靜止，再重新執行。
-
-### 畫面打得開，但圖不更新
-
-請檢查：
-
-- ESP32 序列資料是否還在持續輸出
-- `data/` 內的 log 是否持續增加
-- Dash 模式不穩時，改用 `--static`
-
-## 10. 專案結構
-
-```text
-project_csi_demo/
-|-- main.py
-|-- csi_main.py
-|-- environment.yml
-|-- README.md
-|-- docs/
-|   `-- esp32_csi_flash_guide.md
-|-- data/
-`-- src/
-    |-- config.py
-    |-- csi_3d_display.py
-    |-- esp32_csi_reader.py
-    |-- motion_detector.py
-    `-- wifi_scanner.py
-```
-
-## 11. 建議課堂說法
-
-如果你要在課堂上用一句話介紹這個系統，可以直接這樣講：
-
-> 我們不是在「看見人體影像」，而是在觀察人體進入無線通道後，對 Wi-Fi CSI 造成的可視化擾動。
-
-這句話可以幫學生避免把 CSI 誤解成攝影機或雷達影像。
+> **課堂一句話：** 我們不是在「看見人體影像」，而是在觀察人體進入無線通道後，對 Wi-Fi CSI 造成的可視化擾動。
