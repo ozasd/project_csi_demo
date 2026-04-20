@@ -14,7 +14,6 @@ import csv
 import logging
 import time
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Optional
 
 import numpy as np
@@ -106,30 +105,6 @@ class CSVCSIReader:
         """取得指定區間的 CSI 取樣。"""
         end_idx = min(start_idx + window_size, len(self._samples))
         return self._samples[start_idx:end_idx]
-
-
-def save_samples_to_csv(samples: list[CSISample], filepath: str | Path) -> Path:
-    """將一段 CSI 取樣寫成 CSV，供 CSVCSIReader 回放使用。"""
-    path = Path(filepath)
-    path.parent.mkdir(parents=True, exist_ok=True)
-
-    fieldnames = ["timestamp", *[f"amp_{i}" for i in range(NUM_SUBCARRIERS)], "rssi_dbm"]
-    with open(path, "w", encoding="utf-8", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        for sample in samples:
-            row = {
-                "timestamp": f"{sample.timestamp:.6f}",
-                "rssi_dbm": f"{sample.rssi_dbm:.4f}",
-            }
-            amplitudes = sample.amplitudes[:NUM_SUBCARRIERS]
-            for idx in range(NUM_SUBCARRIERS):
-                value = amplitudes[idx] if idx < len(amplitudes) else 0.0
-                row[f"amp_{idx}"] = f"{float(value):.8f}"
-            writer.writerow(row)
-
-    logger.info("Saved %d CSI samples to %s", len(samples), path)
-    return path
 
 
 class SimulatedCSIReader:

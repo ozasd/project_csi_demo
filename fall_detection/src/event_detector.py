@@ -53,23 +53,28 @@ class EventDetector:
         self,
         sti_threshold: float = DEFAULT_STI_THRESHOLD,
         similarity_threshold: float = DEFAULT_SIMILARITY_THRESHOLD,
-        duration_threshold: float = 5.0,
+        duration_threshold: float = 3.0,
         sti_analyzer: Optional[STIAnalyzer] = None,
         similarity_analyzer: Optional[SimilarityAnalyzer] = None,
+        adl_similarity_analyzer: Optional[SimilarityAnalyzer] = None,
+        similarity_margin: float = 0.0,
     ):
         self.sti_threshold = sti_threshold
         self.similarity_threshold = similarity_threshold
         self.duration_threshold = duration_threshold
+        self.similarity_margin = similarity_margin
 
         self.sti_analyzer = sti_analyzer or STIAnalyzer(threshold=sti_threshold)
         self.similarity_analyzer = similarity_analyzer or SimilarityAnalyzer(
             threshold=similarity_threshold
         )
+        self.adl_similarity_analyzer = adl_similarity_analyzer
 
         self._status = DetectionStatus.NORMAL
         self._high_similarity_start: Optional[float] = None
         self._current_sti: float = 0.0
         self._current_similarity: float = 0.0
+        self._current_adl_similarity: float = 0.0
         self._fall_confirmed_at: Optional[float] = None
         self._last_timestamp: float = 0.0
         # 基線振幅追蹤（正常時期的平均振幅向量）
@@ -85,6 +90,7 @@ class EventDetector:
         self._high_similarity_start = None
         self._current_sti = 0.0
         self._current_similarity = 0.0
+        self._current_adl_similarity = 0.0
         self._fall_confirmed_at = None
         self._last_timestamp = 0.0
         self._baseline_amplitudes = None
@@ -164,6 +170,12 @@ class EventDetector:
             self._current_similarity = self.similarity_analyzer.compute_similarity(
                 amplitude_matrix
             )
+            if self.adl_similarity_available:
+                self._current_adl_similarity = self.adl_similarity_analyzer.compute_similarity(
+                    amplitude_matrix
+                )
+            else:
+                self._current_adl_similarity = 0.0
         else:
             if self._current_sti > self.sti_threshold:
                 self._status = DetectionStatus.MOTION_DETECTED
@@ -172,6 +184,11 @@ class EventDetector:
         # 6. 判斷是否符合跌倒條件
         #    條件 A：相似度超標（時序型態與跌倒模板吻合）
         fall_pattern_detected = self._current_similarity > self.similarity_threshold
+        if self.adl_similarity_available:
+            fall_pattern_detected = (
+                fall_pattern_detected
+                and (self._current_similarity - self._current_adl_similarity) >= self.similarity_margin
+            )
 
         #    條件 B：已在觀察期 + 振幅持續偏移（人在地上，CSI 穩定在新水準）
         post_fall_stable = (
@@ -223,6 +240,21 @@ class EventDetector:
         return self._current_similarity
 
     @property
+    def similarity_available(self) -> bool:
+        return self.similarity_analyzer.has_templates
+
+    @property
+    def adl_similarity_available(self) -> bool:
+        return (
+            self.adl_similarity_analyzer is not None
+            and self.adl_similarity_analyzer.has_templates
+        )
+
+    @property
+    def current_adl_similarity(self) -> float:
+        return self._current_adl_similarity
+
+    @property
     def amplitude_shift(self) -> float:
         """當前振幅相對於基線的偏移量（比例）。"""
         return self._amplitude_shift
@@ -247,6 +279,8 @@ class EventDetector:
             "timestamp": datetime.fromtimestamp(ts, tz=timezone.utc).isoformat(),
             "sti": round(self._current_sti, 4),
             "similarity": round(self._current_similarity, 4),
+            "adl_similarity": round(self._current_adl_similarity, 4),
+            "similarity_gap": round(self._current_similarity - self._current_adl_similarity, 4),
             "status": self._status.value,
             "high_similarity_duration": round(self.high_similarity_duration, 2),
         }

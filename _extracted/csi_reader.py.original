@@ -14,7 +14,6 @@ import csv
 import logging
 import time
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Optional
 
 import numpy as np
@@ -108,55 +107,16 @@ class CSVCSIReader:
         return self._samples[start_idx:end_idx]
 
 
-def save_samples_to_csv(samples: list[CSISample], filepath: str | Path) -> Path:
-    """將一段 CSI 取樣寫成 CSV，供 CSVCSIReader 回放使用。"""
-    path = Path(filepath)
-    path.parent.mkdir(parents=True, exist_ok=True)
-
-    fieldnames = ["timestamp", *[f"amp_{i}" for i in range(NUM_SUBCARRIERS)], "rssi_dbm"]
-    with open(path, "w", encoding="utf-8", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        for sample in samples:
-            row = {
-                "timestamp": f"{sample.timestamp:.6f}",
-                "rssi_dbm": f"{sample.rssi_dbm:.4f}",
-            }
-            amplitudes = sample.amplitudes[:NUM_SUBCARRIERS]
-            for idx in range(NUM_SUBCARRIERS):
-                value = amplitudes[idx] if idx < len(amplitudes) else 0.0
-                row[f"amp_{idx}"] = f"{float(value):.8f}"
-            writer.writerow(row)
-
-    logger.info("Saved %d CSI samples to %s", len(samples), path)
-    return path
-
-
 class SimulatedCSIReader:
     """產生模擬 CSI 資料供測試使用。
 
     可模擬三種狀態：normal（靜止/走動）、motion（大動作）、fall（跌倒）。
-    跌倒模式使用固定的 fall_shift 特徵向量，可用於同步建立模板。
     """
-
-    # 固定的跌倒特徵偏移（用於模板同步）
-    _FALL_SHIFT_SEED = 99
 
     def __init__(self, sample_rate: float = 20.0, seed: int = 42):
         self._sample_rate = sample_rate
         self._rng = np.random.default_rng(seed)
         self._base_amplitude = self._rng.uniform(0.3, 0.8, size=NUM_SUBCARRIERS)
-        # 跌倒特徵偏移使用獨立 seed 確保可重複
-        fall_rng = np.random.default_rng(self._FALL_SHIFT_SEED)
-        self._fall_shift = fall_rng.uniform(-0.3, 0.3, size=NUM_SUBCARRIERS)
-
-    @property
-    def base_amplitude(self) -> np.ndarray:
-        return self._base_amplitude.copy()
-
-    @property
-    def fall_shift(self) -> np.ndarray:
-        return self._fall_shift.copy()
 
     def generate_normal(self, duration: float = 10.0) -> list[CSISample]:
         """產生靜止/正常狀態的 CSI 資料。"""
@@ -164,10 +124,13 @@ class SimulatedCSIReader:
         t0 = time.time()
         samples = []
         for i in range(n_samples):
-            noise = self._rng.normal(0, 0.01, size=NUM_SUBCARRIERS)
+            noise = self._rng.normal(0, 0.02, size=NUM_SUBCARRIERS)
             amps = np.clip(self._base_amplitude + noise, 0, 2.0)
             samples.append(
-                CSISample(timestamp=t0 + i / self._sample_rate, amplitudes=amps)
+                CSISample(
+                    timestamp=t0 + i / self._sample_rate,
+                    amplitudes=amps,
+                )
             )
         return samples
 
@@ -184,26 +147,27 @@ class SimulatedCSIReader:
         # 跌倒前：靜止
         n_pre = int(pre_seconds * self._sample_rate)
         for i in range(n_pre):
-            noise = self._rng.normal(0, 0.01, size=NUM_SUBCARRIERS)
+            noise = self._rng.normal(0, 0.02, size=NUM_SUBCARRIERS)
             amps = np.clip(self._base_amplitude + noise, 0, 2.0)
             samples.append(CSISample(timestamp=t0 + idx / self._sample_rate, amplitudes=amps))
             idx += 1
 
         # 跌倒瞬間：振幅劇烈變化
         n_fall = int(fall_seconds * self._sample_rate)
+        fall_shift = self._rng.uniform(-0.4, 0.4, size=NUM_SUBCARRIERS)
         for i in range(n_fall):
             progress = i / max(n_fall - 1, 1)
-            shift = self._fall_shift * progress
-            noise = self._rng.normal(0, 0.04, size=NUM_SUBCARRIERS)
+            shift = fall_shift * progress
+            noise = self._rng.normal(0, 0.06, size=NUM_SUBCARRIERS)
             amps = np.clip(self._base_amplitude + shift + noise, 0, 2.0)
             samples.append(CSISample(timestamp=t0 + idx / self._sample_rate, amplitudes=amps))
             idx += 1
 
         # 跌倒後：新的穩定模式（人倒在地上）
-        fallen_amplitude = self._base_amplitude + self._fall_shift
+        fallen_amplitude = self._base_amplitude + fall_shift
         n_post = int(post_seconds * self._sample_rate)
         for i in range(n_post):
-            noise = self._rng.normal(0, 0.01, size=NUM_SUBCARRIERS)
+            noise = self._rng.normal(0, 0.02, size=NUM_SUBCARRIERS)
             amps = np.clip(fallen_amplitude + noise, 0, 2.0)
             samples.append(CSISample(timestamp=t0 + idx / self._sample_rate, amplitudes=amps))
             idx += 1
@@ -217,35 +181,12 @@ class SimulatedCSIReader:
         samples = []
         for i in range(n_samples):
             phase = 2.0 * np.pi * i / (self._sample_rate * 2.0)  # ~0.5 Hz 週期
-            walk_variation = 0.08 * np.sin(
+            walk_variation = 0.1 * np.sin(
                 phase + np.linspace(0, np.pi, NUM_SUBCARRIERS)
             )
-            noise = self._rng.normal(0, 0.02, size=NUM_SUBCARRIERS)
+            noise = self._rng.normal(0, 0.03, size=NUM_SUBCARRIERS)
             amps = np.clip(self._base_amplitude + walk_variation + noise, 0, 2.0)
             samples.append(
                 CSISample(timestamp=t0 + i / self._sample_rate, amplitudes=amps)
             )
         return samples
-
-    def build_fall_template(self, window_size: int = 40) -> np.ndarray:
-        """根據本模擬器的跌倒特徵建立模板矩陣。
-
-        模板反映跌倒事件的 CSI 矩陣型態：
-        前 1/3 穩定 → 中間 1/6 突變 → 後 1/2 新穩態。
-        """
-        template = np.zeros((NUM_SUBCARRIERS, window_size), dtype=np.float64)
-        phase_1_end = window_size // 3
-        phase_2_end = phase_1_end + window_size // 6
-
-        for t in range(phase_1_end):
-            template[:, t] = self._base_amplitude
-
-        for t in range(phase_1_end, phase_2_end):
-            progress = (t - phase_1_end) / max(phase_2_end - phase_1_end - 1, 1)
-            template[:, t] = self._base_amplitude + self._fall_shift * progress
-
-        fallen = self._base_amplitude + self._fall_shift
-        for t in range(phase_2_end, window_size):
-            template[:, t] = fallen
-
-        return np.clip(template, 0, 2.0)

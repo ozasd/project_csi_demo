@@ -1,0 +1,97 @@
+File: c:\Users\ozasd\Documents\project_csi_demo\src\fall_detection\event_detector.py
+--- OLD ---
+        now = timestamp or time.time()
+
+        # 1. 計算 STI
+        self._current_sti = self.sti_analyzer.update(subcarrier_amplitudes)
+
+        # 2. 檢查 STI 門檻
+        if self._current_sti <= self.sti_threshold:
+            # STI 未超標，若非持續高相似度期間，回歸正常
+            if self._high_similarity_start is None:
+                self._status = DetectionStatus.NORMAL
+                return self._status
+            # 若仍在高相似度觀察期，繼續往下判斷相似度
+            # （跌倒後 STI 可能降低，但相似度仍高）
+
+        # 3. 計算相似度（需要完整矩陣）
+        if amplitude_matrix is not None and amplitude_matrix.shape[1] >= 2:
+            self._current_similarity = self.similarity_analyzer.compute_similarity(
+                amplitude_matrix
+            )
+        else:
+            # 無矩陣可比對，僅標記動作
+            if self._current_sti > self.sti_threshold:
+                self._status = DetectionStatus.MOTION_DETECTED
+            return self._status
+
+        # 4. 檢查相似度門檻
+        if self._current_similarity <= self.similarity_threshold:
+            self._high_similarity_start = None
+            if self._current_sti > self.sti_threshold:
+                self._status = DetectionStatus.MOTION_DETECTED
+            else:
+                self._status = DetectionStatus.NORMAL
+            return self._status
+
+        # 5. 相似度超過門檻 → 開始計時
+        if self._high_similarity_start is None:
+            self._high_similarity_start = now
+
+        elapsed = now - self._high_similarity_start
+
+        # 6. 持續時間判斷
+        if elapsed >= self.duration_threshold:
+            self._status = DetectionStatus.FALL_DETECTED
+            if self._fall_confirmed_at is None:
+                self._fall_confirmed_at = now
+        else:
+            self._status = DetectionStatus.MOTION_DETECTED
+--- NEW ---
+        now = timestamp or time.time()
+        self._last_timestamp = now
+
+        # 1. 計算 STI
+        self._current_sti = self.sti_analyzer.update(subcarrier_amplitudes)
+
+        # 2. 若已進入高相似度觀察期，即使 STI 降低也繼續判斷
+        #    （跌倒後人倒在地上，STI 會降低但模式仍像跌倒）
+        in_observation = self._high_similarity_start is not None
+
+        # 3. STI 未超標且不在觀察期 → 正常
+        if self._current_sti <= self.sti_threshold and not in_observation:
+            self._status = DetectionStatus.NORMAL
+            return self._status
+
+        # 4. 計算相似度（需要完整矩陣）
+        if amplitude_matrix is not None and amplitude_matrix.shape[1] >= 2:
+            self._current_similarity = self.similarity_analyzer.compute_similarity(
+                amplitude_matrix
+            )
+        else:
+            if self._current_sti > self.sti_threshold:
+                self._status = DetectionStatus.MOTION_DETECTED
+            return self._status
+
+        # 5. 檢查相似度門檻
+        if self._current_similarity <= self.similarity_threshold:
+            self._high_similarity_start = None
+            if self._current_sti > self.sti_threshold:
+                self._status = DetectionStatus.MOTION_DETECTED
+            else:
+                self._status = DetectionStatus.NORMAL
+            return self._status
+
+        # 6. 相似度超過門檻 → 開始計時
+        if self._high_similarity_start is None:
+            self._high_similarity_start = now
+
+        elapsed = now - self._high_similarity_start
+
+        # 7. 持續時間判斷
+        if elapsed >= self.duration_threshold:
+            self._status = DetectionStatus.FALL_DETECTED
+            if self._fall_confirmed_at is None:
+                self._fall_confirmed_at = now
+        else:
+            self._status = DetectionStatus.MOTION_DETECTED

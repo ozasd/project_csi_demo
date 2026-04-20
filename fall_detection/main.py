@@ -104,8 +104,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--simulate", action="store_true", help="使用模擬資料（不需要 ESP32）")
     # 偵測參數
     parser.add_argument("--sti-threshold", type=float, default=0.22, help="STI 門檻 (預設: 0.22)")
-    parser.add_argument("--sim-threshold", type=float, default=0.85, help="相似度門檻 (預設: 0.85)")
-    parser.add_argument("--duration-threshold", type=float, default=5.0, help="持續時間門檻 (預設: 5.0 秒)")
+    parser.add_argument("--sim-threshold", type=float, default=0.65, help="相似度門檻 (預設: 0.65)")
+    parser.add_argument("--duration-threshold", type=float, default=3.0, help="持續時間門檻 (預設: 3.0 秒)")
     return parser.parse_args()
 
 

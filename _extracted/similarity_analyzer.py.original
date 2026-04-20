@@ -6,13 +6,8 @@ CSI 矩陣相似度分析器。
 - 計算目前 CSI 矩陣與模板矩陣的相關係數（相似度）
 - 判斷是否超過相似度門檻
 
-核心改進：
-  以「逐子載波時序相關」取代「整矩陣展平相關」，
-  聚焦在每個子載波的時間變化型態（穩定→突變→新穩態），
-  而非被靜態振幅 profile 主導。
-
-  每個子載波計算時間軸 Pearson r（取絕對值，不限方向），
-  再對所有「有時序變化資訊」的子載波取平均。
+相似度公式（矩陣相關係數）：
+  r = Σ(A_mn - A_bar)(B_mn - B_bar) / sqrt(Σ(A_mn - A_bar)^2 · Σ(B_mn - B_bar)^2)
 """
 
 from __future__ import annotations
@@ -26,59 +21,50 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_SIMILARITY_THRESHOLD = 0.65
+DEFAULT_SIMILARITY_THRESHOLD = 0.85
 
 
 def matrix_correlation(A: np.ndarray, B: np.ndarray) -> float:
-    """計算兩個矩陣的平均絕對子載波時序 Pearson 相關係數。
-
-    對每個子載波（row），分別計算時間軸上的 Pearson 相關係數，
-    取絕對值後平均。這樣聚焦在「時序型態是否匹配」，
-    而不受靜態振幅分佈影響。
+    """計算兩個矩陣的 Pearson 相關係數。
 
     Parameters
     ----------
     A, B : np.ndarray
-        shape (n_subcarriers, T)。
+        形狀須相同（或可廣播）。
 
     Returns
     -------
     r : float
-        平均絕對子載波時序相關係數，範圍 [0, 1]。
+        相關係數，範圍 [-1, 1]。若標準差為零則回傳 0。
     """
-    min_s = min(A.shape[0], B.shape[0])
-    min_t = min(A.shape[1], B.shape[1])
+    A_flat = A.ravel().astype(np.float64)
+    B_flat = B.ravel().astype(np.float64)
 
-    if min_t < 3 or min_s == 0:
+    # 確保大小一致：取較小的長度
+    min_len = min(len(A_flat), len(B_flat))
+    A_flat = A_flat[:min_len]
+    B_flat = B_flat[:min_len]
+
+    A_mean = np.mean(A_flat)
+    B_mean = np.mean(B_flat)
+
+    A_diff = A_flat - A_mean
+    B_diff = B_flat - B_mean
+
+    numerator = np.sum(A_diff * B_diff)
+    denominator = np.sqrt(np.sum(A_diff ** 2) * np.sum(B_diff ** 2))
+
+    if denominator < 1e-12:
         return 0.0
 
-    abs_corrs = []
-    for i in range(min_s):
-        a = A[i, :min_t].astype(np.float64)
-        b = B[i, :min_t].astype(np.float64)
-
-        a_std = np.std(a)
-        b_std = np.std(b)
-
-        # 若任一子載波在時間軸上幾乎無變化，代表它沒有提供可用時序資訊。
-        # 在真實 ESP32 資料裡，部分子載波可能長期為 0，應跳過而不是拉低整體相似度。
-        if a_std < 1e-12 or b_std < 1e-12:
-            continue
-
-        r = np.corrcoef(a, b)[0, 1]
-        if np.isnan(r):
-            abs_corrs.append(0.0)
-        else:
-            abs_corrs.append(abs(r))
-
-    return float(np.mean(abs_corrs)) if abs_corrs else 0.0
+    return float(numerator / denominator)
 
 
 class FallTemplateManager:
     """跌倒模板管理器。
 
     支援：
-    - 從模擬資料建立預設模板
+    - 從模擬資料自動建立預設模板
     - 從檔案載入/儲存模板
     - 管理多個模板並取最高相似度
     """
@@ -112,38 +98,38 @@ class FallTemplateManager:
         logger.info("Loaded %d templates from %s", len(self._templates), filepath)
 
     def build_default_template(self, n_subcarriers: int = 52, window_size: int = 40) -> None:
-        """建立預設跌倒模板（標準階梯函數）。
+        """建立預設跌倒模板。
 
-        反映跌倒時的 CSI 時序特徵：
-        - 前 1/4：穩定基線
-        - 中 1/4：線性轉換（跌倒瞬間）
-        - 後 1/2：新穩態（人倒在地上）
-
-        使用絕對子載波相關時，所有子載波往同一方向偏移即可，
-        因為計算時取 |r|，不在意實際偏移方向。
+        模擬跌倒時的 CSI 矩陣特徵：
+        - 前半段：穩定（低變化）
+        - 中間：突變（高變化）
+        - 後半段：新穩態（與前半段不同）
         """
         template = np.zeros((n_subcarriers, window_size), dtype=np.float64)
+        rng = np.random.default_rng(0)
 
-        transition_start = window_size // 4
-        transition_end = transition_start + window_size // 4
+        phase_1_end = window_size // 3
+        phase_2_end = window_size // 3 + window_size // 6
+        base = rng.uniform(0.3, 0.7, size=n_subcarriers)
 
-        base_val = 0.5
-        shift_val = 0.3  # 統一偏移方向
+        # 穩定期
+        for t in range(phase_1_end):
+            template[:, t] = base + rng.normal(0, 0.02, size=n_subcarriers)
 
-        for i in range(n_subcarriers):
-            # 穩定期
-            template[i, :transition_start] = base_val
+        # 突變期
+        shift = rng.uniform(-0.3, 0.3, size=n_subcarriers)
+        for t in range(phase_1_end, phase_2_end):
+            progress = (t - phase_1_end) / max(phase_2_end - phase_1_end - 1, 1)
+            template[:, t] = base + shift * progress + rng.normal(0, 0.05, size=n_subcarriers)
 
-            # 轉換期（線性過渡）
-            for t in range(transition_start, transition_end):
-                progress = (t - transition_start) / max(transition_end - transition_start - 1, 1)
-                template[i, t] = base_val + shift_val * progress
+        # 新穩態
+        fallen_base = base + shift
+        for t in range(phase_2_end, window_size):
+            template[:, t] = fallen_base + rng.normal(0, 0.02, size=n_subcarriers)
 
-            # 新穩態
-            template[i, transition_end:] = base_val + shift_val
-
+        template = np.clip(template, 0, 2.0)
         self._templates.append(template)
-        logger.info("Built default fall template (step function): shape %s", template.shape)
+        logger.info("Built default fall template: shape %s", template.shape)
 
 
 class SimilarityAnalyzer:
@@ -153,18 +139,13 @@ class SimilarityAnalyzer:
         self,
         threshold: float = DEFAULT_SIMILARITY_THRESHOLD,
         template_manager: Optional[FallTemplateManager] = None,
-        build_default_template_if_empty: bool = False,
     ):
         self.threshold = threshold
         self.template_manager = template_manager or FallTemplateManager()
 
-        # 只在明確要求時才建立預設模板，避免即時模式在沒有真實模板時仍顯示相似度。
-        if build_default_template_if_empty and self.template_manager.template_count == 0:
+        # 若沒有模板，建立預設模板
+        if self.template_manager.template_count == 0:
             self.template_manager.build_default_template()
-
-    @property
-    def has_templates(self) -> bool:
-        return self.template_manager.template_count > 0
 
     def compute_similarity(self, current_matrix: np.ndarray) -> float:
         """計算目前矩陣與所有模板的最高相似度。
@@ -178,7 +159,7 @@ class SimilarityAnalyzer:
         max_similarity : float
             與所有模板中最高的相關係數。
         """
-        if not self.has_templates:
+        if self.template_manager.template_count == 0:
             return 0.0
 
         max_sim = -1.0

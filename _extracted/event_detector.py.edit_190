@@ -1,0 +1,16 @@
+File: c:\Users\ozasd\Documents\project_csi_demo\src\fall_detection\event_detector.py
+--- OLD ---
+        self.sti_analyzer.reset()
+        self._status = DetectionStatus.NORMAL
+        self._high_similarity_start = None
+        self._current_sti = 0.0
+        self._current_similarity = 0.0
+        self._fall_confirmed_at = None
+--- NEW ---
+        self.sti_analyzer.reset()
+        self._status = DetectionStatus.NORMAL
+        self._high_similarity_start = None
+        self._current_sti = 0.0
+        self._current_similarity = 0.0
+        self._fall_confirmed_at = None
+        self._last_timestamp = 0.0
