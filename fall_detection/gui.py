@@ -37,6 +37,13 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from src import config as cfg
 from src.alert_manager import AlertManager
+from src.app_env import (
+    ESP32_DEFAULT_BAUD_ENV,
+    ESP32_DEFAULT_COM_ENV,
+    env_int,
+    env_text,
+    load_env_file,
+)
 from src.csi_reader import (
     CSISample,
     CSVCSIReader,
@@ -87,9 +94,12 @@ STATUS_LABELS = {
 
 
 def parse_args() -> argparse.Namespace:
+    load_env_file()
+    default_com = env_text(ESP32_DEFAULT_COM_ENV, "COM3")
+    default_baud = env_int(ESP32_DEFAULT_BAUD_ENV, 921600)
     parser = argparse.ArgumentParser(description="Wi-Fi CSI 跌倒偵測 GUI")
-    parser.add_argument("--com", default="COM3", help="ESP32 序列埠")
-    parser.add_argument("--baud", type=int, default=921600, help="ESP32 鮑率")
+    parser.add_argument("--com", default=default_com, help=f"ESP32 序列埠 (預設: {default_com})")
+    parser.add_argument("--baud", type=int, default=default_baud, help=f"ESP32 鮑率 (預設: {default_baud})")
     parser.add_argument("--simulate", action="store_true", help="使用模擬資料")
     parser.add_argument("--sti-threshold", type=float, default=DEFAULT_STI_THRESHOLD)
     parser.add_argument("--sim-threshold", type=float, default=DEFAULT_SIMILARITY_THRESHOLD)

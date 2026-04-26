@@ -16,7 +16,16 @@ import argparse
 import os
 import sys
 import time
-from pathlib import Path
+
+from src.app_env import (
+    ESP32_DEFAULT_BAUD_ENV,
+    ESP32_DEFAULT_COM_ENV,
+    ESP32_WIFI_LINE_ENDING_ENV,
+    env_int,
+    env_text,
+    load_env_file,
+)
+from src.serial_utils import open_serial_for_setup, release_serial_control_lines
 
 if sys.platform == "win32":
     try:
@@ -25,31 +34,13 @@ if sys.platform == "win32":
     except Exception:
         pass
 
-# .env 放在專案根目錄（上一層）
-ENV_FILE = Path(__file__).resolve().parent.parent / ".env"
 WIFI_DEFAULT_SSID_ENV = "WIFI_DEFAULT_SSID"
 WIFI_DEFAULT_PASSWORD_ENV = "WIFI_DEFAULT_PASSWORD"
-
-
-def load_env_file(path: Path = ENV_FILE) -> None:
-    """讀取 .env 檔案並設定環境變數。"""
-    if not path.is_file():
-        return
-
-    for raw_line in path.read_text(encoding="utf-8").splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-
-        key, value = line.split("=", 1)
-        key = key.strip()
-        value = value.strip()
-        if not key or key in os.environ:
-            continue
-
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
-            value = value[1:-1]
-        os.environ[key] = value
+LINE_ENDINGS = {
+    "cr": "\r",
+    "lf": "\n",
+    "crlf": "\r\n",
+}
 
 
 def maybe_reexec_into_wifi_env() -> None:
@@ -75,6 +66,8 @@ def maybe_reexec_into_wifi_env() -> None:
 
 
 def parse_args() -> argparse.Namespace:
+    default_com = env_text(ESP32_DEFAULT_COM_ENV, "COM3")
+    default_baud = env_int(ESP32_DEFAULT_BAUD_ENV, 921600)
     parser = argparse.ArgumentParser(
         description="ESP32 CSI 跌倒偵測系統啟動器",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -85,11 +78,11 @@ def parse_args() -> argparse.Namespace:
             '  python main.py --ssid "Tracy 2" --password a7802568\n'
             "  python main.py --simulate\n\n"
             "環境變數:\n"
-            "  .env -> WIFI_DEFAULT_SSID / WIFI_DEFAULT_PASSWORD"
+            "  .env -> WIFI_DEFAULT_SSID / WIFI_DEFAULT_PASSWORD / ESP32_DEFAULT_COM / ESP32_DEFAULT_BAUD"
         ),
     )
-    parser.add_argument("--com", default="COM3", help="ESP32 序列埠 (預設: COM3)")
-    parser.add_argument("--baud", type=int, default=921600, help="ESP32 鮑率 (預設: 921600)")
+    parser.add_argument("--com", default=default_com, help=f"ESP32 序列埠 (預設: {default_com})")
+    parser.add_argument("--baud", type=int, default=default_baud, help=f"ESP32 鮑率 (預設: {default_baud})")
     parser.add_argument(
         "--ssid",
         help=f"Wi-Fi SSID（覆蓋 {WIFI_DEFAULT_SSID_ENV}）",
@@ -100,6 +93,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--setup-timeout", type=int, default=20, help="等待 ESP32 提示的逾時秒數")
     parser.add_argument("--connect-timeout", type=int, default=30, help="等待 CSI_DATA 的逾時秒數")
+    parser.add_argument(
+        "--wifi-line-ending",
+        choices=sorted(LINE_ENDINGS),
+        default=env_text(ESP32_WIFI_LINE_ENDING_ENV, "cr").lower(),
+        help="傳送 Wi-Fi 帳密時使用的行尾 (預設: cr)",
+    )
     parser.add_argument("--skip-setup", action="store_true", help="跳過 Wi-Fi 設定，直接啟動 GUI")
     parser.add_argument("--simulate", action="store_true", help="使用模擬資料（不需要 ESP32）")
     # 偵測參數
@@ -109,10 +108,10 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def format_wifi_line(ssid: str, password: str) -> str:
+def format_wifi_line(ssid: str, password: str, line_ending: str = "\r") -> str:
     if any(ch.isspace() for ch in ssid):
         ssid = f'"{ssid}"'
-    return f"{ssid} {password}\n" if password else f"{ssid}\n"
+    return f"{ssid} {password}{line_ending}" if password else f"{ssid}{line_ending}"
 
 
 def prompt_credentials(args: argparse.Namespace) -> tuple[str, str]:
@@ -142,13 +141,11 @@ def prompt_credentials(args: argparse.Namespace) -> tuple[str, str]:
 
 
 def reset_esp32(ser) -> None:
-    """硬體重啟 ESP32。"""
+    """釋放 ESP32 自動 reset 控制線，讓新 ESP32-S3 板子留在 app 模式。"""
     ser.setDTR(False)
     ser.setRTS(False)
     time.sleep(0.2)
     ser.reset_input_buffer()
-    ser.setDTR(True)
-    ser.setRTS(True)
 
 
 def read_until_prompt_or_csi(ser, timeout: int) -> str:
@@ -183,6 +180,12 @@ def wait_for_csi(ser, timeout: int) -> bool:
         if line.startswith("CSI_DATA"):
             return True
     return False
+
+
+def print_wifi_timeout_hints(ssid: str) -> None:
+    print(f"[提示] 本次送出的 SSID: {ssid}")
+    print("[提示] ESP32 只支援 2.4 GHz Wi-Fi，手機熱點請改用 2.4 GHz / WPA2-Personal。")
+    print("[提示] 若手機熱點顯示 5 GHz、6 GHz 或 WPA3-only，ESP32 會連不上。")
 
 
 def launch_gui(args: argparse.Namespace) -> None:
@@ -221,7 +224,7 @@ def main() -> int:
 
     print(f"[初始化] 開啟 {args.com} @ {args.baud} ...")
     try:
-        ser = serial.Serial(args.com, args.baud, timeout=0.5)
+        ser = open_serial_for_setup(args.com, args.baud, timeout=0.5)
     except serial.SerialException as exc:
         print(f"[錯誤] 無法開啟 {args.com}: {exc}")
         print("[提示] 請確認 ESP32 已連接且序列埠未被其他程式佔用。")
@@ -236,11 +239,12 @@ def main() -> int:
         if state == "prompt":
             ssid, password = prompt_credentials(args)
             print("[傳送] 正在傳送 Wi-Fi 帳密 ...")
-            ser.write(format_wifi_line(ssid, password).encode("utf-8"))
+            ser.write(format_wifi_line(ssid, password, LINE_ENDINGS[args.wifi_line_ending]).encode("utf-8"))
             ser.flush()
             if not wait_for_csi(ser, args.connect_timeout):
                 print("[錯誤] 傳送 Wi-Fi 帳密後等待 CSI_DATA 逾時。")
                 print("[提示] 請檢查 SSID/密碼並確認 ESP32 能連到該 AP。")
+                print_wifi_timeout_hints(ssid)
                 return 1
         elif state == "csi":
             print("[成功] CSI_DATA 已在傳輸中。")
@@ -249,6 +253,7 @@ def main() -> int:
             print("[提示] 請按一下 ESP32 上的 EN 鍵再重試。")
             return 1
     finally:
+        release_serial_control_lines(ser)
         ser.close()
 
     launch_gui(args)

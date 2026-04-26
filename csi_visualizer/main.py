@@ -15,8 +15,16 @@ import argparse
 import os
 import sys
 import time
-from pathlib import Path
 
+from src.app_env import (
+    ESP32_DEFAULT_BAUD_ENV,
+    ESP32_DEFAULT_COM_ENV,
+    ESP32_WIFI_LINE_ENDING_ENV,
+    env_int,
+    env_text,
+    load_env_file,
+)
+from src.serial_utils import open_serial_for_setup, release_serial_control_lines
 
 if sys.platform == "win32":
     try:
@@ -26,29 +34,13 @@ if sys.platform == "win32":
         pass
 
 
-ENV_FILE = Path(__file__).resolve().parent.parent / ".env"
 WIFI_DEFAULT_SSID_ENV = "WIFI_DEFAULT_SSID"
 WIFI_DEFAULT_PASSWORD_ENV = "WIFI_DEFAULT_PASSWORD"
-
-
-def load_env_file(path: Path = ENV_FILE) -> None:
-    if not path.is_file():
-        return
-
-    for raw_line in path.read_text(encoding="utf-8").splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-
-        key, value = line.split("=", 1)
-        key = key.strip()
-        value = value.strip()
-        if not key or key in os.environ:
-            continue
-
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
-            value = value[1:-1]
-        os.environ[key] = value
+LINE_ENDINGS = {
+    "cr": "\r",
+    "lf": "\n",
+    "crlf": "\r\n",
+}
 
 
 def maybe_reexec_into_wifi_env() -> None:
@@ -73,6 +65,8 @@ def maybe_reexec_into_wifi_env() -> None:
 
 
 def parse_args() -> argparse.Namespace:
+    default_com = env_text(ESP32_DEFAULT_COM_ENV, "COM3")
+    default_baud = env_int(ESP32_DEFAULT_BAUD_ENV, 921600)
     parser = argparse.ArgumentParser(
         description="ESP32 CSI launcher",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -83,11 +77,11 @@ def parse_args() -> argparse.Namespace:
             "  python main.py --ssid \"Tracy 2\" --password a7802568\n"
             "  python main.py --static\n\n"
             "Environment defaults:\n"
-            "  .env -> WIFI_DEFAULT_SSID / WIFI_DEFAULT_PASSWORD"
+            "  .env -> WIFI_DEFAULT_SSID / WIFI_DEFAULT_PASSWORD / ESP32_DEFAULT_COM / ESP32_DEFAULT_BAUD"
         ),
     )
-    parser.add_argument("--com", default="COM3", help="ESP32 serial port")
-    parser.add_argument("--baud", type=int, default=921600, help="ESP32 serial baudrate")
+    parser.add_argument("--com", default=default_com, help=f"ESP32 serial port (default: {default_com})")
+    parser.add_argument("--baud", type=int, default=default_baud, help=f"ESP32 serial baudrate (default: {default_baud})")
     parser.add_argument(
         "--ssid",
         help=f"Wi-Fi SSID for non-interactive startup (overrides {WIFI_DEFAULT_SSID_ENV})",
@@ -98,6 +92,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--setup-timeout", type=int, default=20, help="Seconds to wait for prompt or CSI")
     parser.add_argument("--connect-timeout", type=int, default=30, help="Seconds to wait for CSI after sending Wi-Fi")
+    parser.add_argument(
+        "--wifi-line-ending",
+        choices=sorted(LINE_ENDINGS),
+        default=env_text(ESP32_WIFI_LINE_ENDING_ENV, "cr").lower(),
+        help="Line ending used when sending Wi-Fi credentials (default: cr)",
+    )
     parser.add_argument("--static", action="store_true", help="Launch csi_main.py in static HTML mode")
     parser.add_argument("--port", type=int, default=8050, help="Dash server port")
     parser.add_argument("--frames", type=int, default=80, help="Frame history size")
@@ -109,10 +109,10 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def format_wifi_line(ssid: str, password: str) -> str:
+def format_wifi_line(ssid: str, password: str, line_ending: str = "\r") -> str:
     if any(ch.isspace() for ch in ssid):
         ssid = f'"{ssid}"'
-    return f"{ssid} {password}\n" if password else f"{ssid}\n"
+    return f"{ssid} {password}{line_ending}" if password else f"{ssid}{line_ending}"
 
 
 def prompt_credentials(args: argparse.Namespace) -> tuple[str, str]:
@@ -145,8 +145,6 @@ def reset_esp32(ser) -> None:
     ser.setRTS(False)
     time.sleep(0.2)
     ser.reset_input_buffer()
-    ser.setDTR(True)
-    ser.setRTS(True)
 
 
 def read_until_prompt_or_csi(ser, timeout: int) -> str:
@@ -225,7 +223,7 @@ def main() -> int:
 
     print(f"[INIT] Opening {args.com} @ {args.baud} ...")
     try:
-        ser = serial.Serial(args.com, args.baud, timeout=0.5)
+        ser = open_serial_for_setup(args.com, args.baud, timeout=0.5)
     except serial.SerialException as exc:
         print(f"[ERR] Cannot open {args.com}: {exc}")
         print("[TIP] Confirm the board is connected and no other program is using the port.")
@@ -240,7 +238,7 @@ def main() -> int:
         if state == "prompt":
             ssid, password = prompt_credentials(args)
             print("[SEND] Sending Wi-Fi credentials ...")
-            ser.write(format_wifi_line(ssid, password).encode("utf-8"))
+            ser.write(format_wifi_line(ssid, password, LINE_ENDINGS[args.wifi_line_ending]).encode("utf-8"))
             ser.flush()
             if not wait_for_csi(ser, args.connect_timeout):
                 print("[ERR] Timed out waiting for CSI_DATA after sending Wi-Fi credentials.")
@@ -253,6 +251,7 @@ def main() -> int:
             print("[TIP] Press EN on the ESP32 once and retry.")
             return 1
     finally:
+        release_serial_control_lines(ser)
         ser.close()
 
     launch_visualizer(args)

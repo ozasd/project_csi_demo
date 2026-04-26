@@ -25,6 +25,13 @@ if sys.platform == "win32":
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from src import config as cfg
+from src.app_env import (
+    ESP32_DEFAULT_BAUD_ENV,
+    ESP32_DEFAULT_COM_ENV,
+    env_int,
+    env_text,
+    load_env_file,
+)
 from src.csi_3d_display import CSI3DDisplay
 from src.esp32_csi_reader import ESP32CSISource
 from src.motion_detector import MotionDetector
@@ -32,6 +39,9 @@ from src.wifi_scanner import WiFiScanner
 
 
 def parse_args() -> argparse.Namespace:
+    load_env_file()
+    default_com = env_text(ESP32_DEFAULT_COM_ENV, "COM3")
+    default_baud = env_int(ESP32_DEFAULT_BAUD_ENV, 921600)
     parser = argparse.ArgumentParser(
         description="ESP32 CSI 3D visualizer",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -42,8 +52,8 @@ def parse_args() -> argparse.Namespace:
             "  python csi_main.py --com COM4 --port 8080"
         ),
     )
-    parser.add_argument("--com", default="COM3", help="ESP32 serial port")
-    parser.add_argument("--baud", type=int, default=921600, help="ESP32 serial baudrate")
+    parser.add_argument("--com", default=default_com, help=f"ESP32 serial port (default: {default_com})")
+    parser.add_argument("--baud", type=int, default=default_baud, help=f"ESP32 serial baudrate (default: {default_baud})")
     parser.add_argument("--static", action="store_true", help="Write static HTML instead of Dash")
     parser.add_argument("--port", type=int, default=8050, help="Dash server port")
     parser.add_argument("--frames", type=int, default=80, help="Number of frames to retain in the time axis")

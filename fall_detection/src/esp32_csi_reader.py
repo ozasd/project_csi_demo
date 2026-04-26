@@ -23,6 +23,7 @@ from typing import Optional, Protocol
 import numpy as np
 
 from src import config as cfg
+from src.serial_utils import open_serial_without_reset, release_serial_control_lines
 
 logger = logging.getLogger(__name__)
 
@@ -151,7 +152,7 @@ class ESP32CSISource:
             ) from exc
 
         logger.info("Opening serial %s @ %s", self.port, self.baudrate)
-        self._serial = serial.Serial(
+        self._serial = open_serial_without_reset(
             port=self.port,
             baudrate=self.baudrate,
             timeout=1,
@@ -168,6 +169,7 @@ class ESP32CSISource:
         if self._thread:
             self._thread.join(timeout=3)
         if self._serial and self._serial.is_open:
+            release_serial_control_lines(self._serial)
             self._serial.close()
 
     def reset_scene_baseline(self) -> None:

@@ -6,3 +6,11 @@ data/*.jsonl
 data/*.html
 data/*.json
 !data/.gitkeep
+csi_visualizer/data/*.csv
+csi_visualizer/data/*.jsonl
+csi_visualizer/data/*.html
+csi_visualizer/data/*.json
+fall_detection/data/*.csv
+fall_detection/data/*.jsonl
+fall_detection/data/*.html
+fall_detection/data/*.json
