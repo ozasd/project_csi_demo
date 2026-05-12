@@ -45,8 +45,19 @@ DEFAULT_LOG_STEM = "csi_runtime_log"
 DEFAULT_FIGURE_HEIGHT = 880
 DEFAULT_CLOUD_Z_MAX = 1.10
 DEFAULT_PROFILE_Y_MAX = 1.10
-DEFAULT_DELTA_Y_MAX = 0.28
+DEFAULT_DELTA_Y_MAX = 0.18
+DEFAULT_CLOUD_COLOR_MAX = 0.12
 DEFAULT_SPECTROGRAM_Z_MAX = 0.32
+DEFAULT_STI_Z_MAX = 1.00
+DEFAULT_POSTURE_Z_MAX = 0.10
+
+CSI_STI_MOTION_THRESHOLD = 0.22
+CSI_STI_STRONG_THRESHOLD = 0.38
+CSI_SUBCARRIER_CHANGE_THRESHOLD = 0.35
+POSTURE_HOLD_FRAMES = 16
+POSTURE_ACTIVE_THRESHOLD = 0.018
+POSTURE_STRONG_THRESHOLD = 0.055
+POSTURE_STABLE_STD_THRESHOLD = 0.018
 
 # ── 共用 subplot / layout 配置 ──────────────────────────────────
 SUBPLOT_SPECS = [
@@ -113,6 +124,16 @@ SPECTROGRAM_COLORSCALE = [
     [1.0, "#ff4d4f"],
 ]
 
+POSTURE_COLORSCALE = [
+    [0.0, "#2563eb"],
+    [0.25, "#38bdf8"],
+    [0.49, "#0f172a"],
+    [0.50, "#111827"],
+    [0.51, "#0f172a"],
+    [0.75, "#facc15"],
+    [1.0, "#ef4444"],
+]
+
 
 @dataclass
 class DisplayScales:
@@ -122,7 +143,10 @@ class DisplayScales:
     cloud_z_max: float = DEFAULT_CLOUD_Z_MAX
     profile_y_max: float = DEFAULT_PROFILE_Y_MAX
     delta_y_max: float = DEFAULT_DELTA_Y_MAX
+    cloud_color_max: float = DEFAULT_CLOUD_COLOR_MAX
     spectrogram_z_max: float = DEFAULT_SPECTROGRAM_Z_MAX
+    sti_z_max: float = DEFAULT_STI_Z_MAX
+    posture_z_max: float = DEFAULT_POSTURE_Z_MAX
 
 
 def _smooth_scale(current: float, target: float, minimum: float) -> float:
@@ -142,12 +166,29 @@ def _compute_time_window_max(time_axis: np.ndarray) -> float:
     return max(0.5, latest_time + padding)
 
 
-def _build_status(snapshot: SceneSnapshot, detector: MotionDetector) -> tuple[str, str]:
+def _build_status(
+    snapshot: SceneSnapshot,
+    detector: MotionDetector,
+    posture_score: float = 0.0,
+    posture_stability: float = 0.0,
+    active_subcarrier_ratio: float = 0.0,
+) -> tuple[str, str]:
     """依據基線與動態狀態決定標題文字。"""
     if not snapshot.is_calibrated:
         return f"靜態空間初始化中 {snapshot.calibration_progress:.0%}", "#ffd166"
+
+    if posture_score >= POSTURE_STRONG_THRESHOLD and posture_stability <= POSTURE_STABLE_STD_THRESHOLD:
+        return "手勢姿勢指紋穩定", "#74c69d"
+
+    if posture_score >= POSTURE_STRONG_THRESHOLD or active_subcarrier_ratio >= 0.22:
+        return "手勢造成明顯 CSI 差異", "#f4a261"
+
+    if active_subcarrier_ratio >= 0.12:
+        return "偵測到手勢姿勢差異", "#ffd166"
+
     if detector.state == MotionState.MOTION:
-        return "偵測到動態變化", "#ff6b6b"
+        return "RSSI 偵測到動態變化", "#f4a261"
+
     if snapshot.foreground_ratio >= 0.18 or snapshot.motion_energy >= 0.10:
         return "場景相對基線已有差異", "#f4a261"
     return "背景穩定", "#4cc9f0"
@@ -280,16 +321,103 @@ def _compute_spectrogram(
     return np.array(centers, dtype=np.float64), filtered_freq_axis, spectrogram
 
 
-def _compute_sti_matrix(display_matrix: np.ndarray) -> np.ndarray:
-    """Build a time-vs-subcarrier heatmap for the STI panel."""
-    return display_matrix.T
+def _standardize_subcarrier_shape(amplitude_matrix: np.ndarray) -> np.ndarray:
+    """Standardize each CSI frame across subcarriers, matching fall_detection STI."""
+    if amplitude_matrix.size == 0:
+        return amplitude_matrix.copy()
+
+    mean = np.mean(amplitude_matrix, axis=1, keepdims=True)
+    std = np.std(amplitude_matrix, axis=1, keepdims=True)
+    std = np.where(std < 1e-9, 1.0, std)
+    return (amplitude_matrix - mean) / std
+
+
+def _compute_sti_matrix(amplitude_matrix: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Build a true CSI-STI heatmap and STI series.
+
+    `fall_detection` computes STI from standardized subcarrier vectors between
+    adjacent frames. The visualizer now uses the same idea instead of simply
+    plotting the baseline-delta matrix under the STI name.
+    """
+    if amplitude_matrix.size == 0:
+        return np.empty((0, 0), dtype=np.float64), np.empty(0, dtype=np.float64)
+
+    standardized = _standardize_subcarrier_shape(amplitude_matrix)
+    frame_delta = np.diff(standardized, axis=0, prepend=standardized[:1])
+    heatmap = np.abs(frame_delta)
+    heatmap = _smooth_matrix(heatmap)
+
+    n_subcarriers = amplitude_matrix.shape[1]
+    norm_factor = np.sqrt(n_subcarriers) if n_subcarriers > 0 else 1.0
+    sti_series = np.linalg.norm(frame_delta, axis=1) / norm_factor
+    if sti_series.size:
+        sti_series[0] = 0.0
+
+    return heatmap.T, sti_series
+
+
+def _summarize_sti(sti_matrix: np.ndarray, sti_series: np.ndarray) -> tuple[float, float, float]:
+    """Return current STI, recent peak STI and active-subcarrier ratio."""
+    if sti_series.size == 0:
+        return 0.0, 0.0, 0.0
+
+    current_window = sti_series[-3:] if sti_series.size >= 3 else sti_series
+    recent_window = sti_series[-20:] if sti_series.size >= 20 else sti_series
+    current_sti = float(np.mean(current_window))
+    peak_sti = float(np.max(recent_window))
+
+    if sti_matrix.size == 0:
+        active_ratio = 0.0
+    else:
+        active_ratio = float(np.mean(sti_matrix[:, -1] >= CSI_SUBCARRIER_CHANGE_THRESHOLD))
+
+    return current_sti, peak_sti, active_ratio
+
+
+def _compute_posture_fingerprint(
+    amplitude_matrix: np.ndarray,
+    snapshot: SceneSnapshot,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, float, float, float]:
+    """
+    Build a static posture fingerprint from CSI amplitudes.
+
+    For hand gestures, the useful signal is often the stable offset from the
+    empty-scene baseline, not the frame-to-frame derivative used by STI.
+    """
+    if amplitude_matrix.size == 0:
+        empty = np.empty((0, 0), dtype=np.float64)
+        return empty, np.empty(0), np.empty(0), 0.0, 0.0, 0.0
+
+    if snapshot.baseline_profile is not None:
+        baseline = snapshot.baseline_profile
+    else:
+        baseline = np.median(amplitude_matrix, axis=0)
+
+    signed_delta = amplitude_matrix - baseline[np.newaxis, :]
+    signed_delta = _smooth_matrix(signed_delta)
+
+    hold_count = min(POSTURE_HOLD_FRAMES, len(amplitude_matrix))
+    recent_amplitudes = amplitude_matrix[-hold_count:]
+    recent_delta = signed_delta[-hold_count:]
+
+    hold_profile = np.mean(recent_amplitudes, axis=0)
+    hold_delta_profile = np.mean(recent_delta, axis=0)
+    abs_hold_delta = np.abs(hold_delta_profile)
+
+    posture_score = float(np.percentile(abs_hold_delta, 90)) if abs_hold_delta.size else 0.0
+    active_ratio = float(np.mean(abs_hold_delta >= POSTURE_ACTIVE_THRESHOLD)) if abs_hold_delta.size else 0.0
+    posture_stability = float(np.mean(np.std(recent_delta, axis=0))) if recent_delta.size else 0.0
+
+    return signed_delta.T, hold_profile, hold_delta_profile, posture_score, active_ratio, posture_stability
 
 
 def _estimate_targets(
     amplitude_matrix: np.ndarray,
     display_matrix: np.ndarray,
     snapshot: SceneSnapshot,
-) -> tuple[float, float, float, float]:
+    posture_matrix: np.ndarray | None = None,
+) -> tuple[float, float, float, float, float]:
     """估計當前畫面該往哪個尺度靠近。"""
     cloud_target = max(DEFAULT_CLOUD_Z_MAX, float(np.percentile(amplitude_matrix, 99) * 1.15))
 
@@ -306,12 +434,17 @@ def _estimate_targets(
     else:
         delta_target = DEFAULT_DELTA_Y_MAX
 
-    spectrogram_target = max(
-        DEFAULT_SPECTROGRAM_Z_MAX,
-        float(np.percentile(display_matrix, 99) * 1.10),
-    )
+    if snapshot.is_calibrated:
+        cloud_color_target = max(DEFAULT_CLOUD_COLOR_MAX, float(np.percentile(display_matrix, 98) * 1.35))
+    else:
+        cloud_color_target = DEFAULT_CLOUD_COLOR_MAX
 
-    return cloud_target, profile_target, delta_target, spectrogram_target
+    if posture_matrix is not None and posture_matrix.size:
+        sti_target = max(DEFAULT_POSTURE_Z_MAX, float(np.percentile(np.abs(posture_matrix), 98) * 1.35))
+    else:
+        sti_target = DEFAULT_POSTURE_Z_MAX
+
+    return cloud_target, profile_target, delta_target, cloud_color_target, sti_target
 
 
 def _make_subplot_figure(titles: tuple[str, ...]) -> go.Figure:
@@ -451,7 +584,7 @@ def _add_cloud_panel(
 
     color_values = display_matrix.reshape(-1)
     amplitude_values = amplitude_matrix.reshape(-1)
-    color_norm = np.clip(color_values / max(scales.spectrogram_z_max, 1e-6), 0.0, 1.0)
+    color_norm = np.clip(color_values / max(scales.cloud_color_max, 1e-6), 0.0, 1.0)
     marker_sizes = 4 + color_norm * 11
 
     fig.add_trace(
@@ -467,7 +600,7 @@ def _add_cloud_panel(
                 color=color_values,
                 colorscale=color_scale,
                 cmin=0.0,
-                cmax=scales.spectrogram_z_max,
+                cmax=scales.cloud_color_max,
                 opacity=0.72,
                 line=dict(width=0),
                 colorbar=_scene_colorbar(fig, color_title),
@@ -484,7 +617,12 @@ def _add_cloud_panel(
     )
 
 
-def _add_profile_panel(fig: go.Figure, snapshot: SceneSnapshot) -> None:
+def _add_profile_panel(
+    fig: go.Figure,
+    snapshot: SceneSnapshot,
+    hold_profile: np.ndarray | None = None,
+    hold_delta_profile: np.ndarray | None = None,
+) -> None:
     """加入右上子載波變化圖。"""
     x_axis = SIGNED_SUBCARRIERS
 
@@ -508,21 +646,42 @@ def _add_profile_panel(fig: go.Figure, snapshot: SceneSnapshot) -> None:
                 x=x_axis,
                 y=snapshot.current_profile,
                 mode="lines",
-                name="目前場景",
-                line=dict(color="#ffffff", width=2.5),
+                name="即時場景",
+                line=dict(color="#ffffff", width=1.2),
+                opacity=0.35,
             ),
             row=2,
             col=1,
             secondary_y=False,
         )
 
-    if snapshot.delta_profile is not None:
+    if hold_profile is not None and hold_profile.size:
         fig.add_trace(
             go.Scatter(
                 x=x_axis,
-                y=snapshot.delta_profile,
+                y=hold_profile,
                 mode="lines",
-                name="前景差分",
+                name="手勢平均",
+                line=dict(color="#ffffff", width=3),
+            ),
+            row=2,
+            col=1,
+            secondary_y=False,
+        )
+
+    delta_profile = hold_delta_profile
+    delta_name = "手勢差分平均"
+    if delta_profile is None and snapshot.delta_profile is not None:
+        delta_profile = snapshot.delta_profile
+        delta_name = "前景差分"
+
+    if delta_profile is not None:
+        fig.add_trace(
+            go.Scatter(
+                x=x_axis,
+                y=np.abs(delta_profile),
+                mode="lines",
+                name=delta_name,
                 line=dict(color="#ee964b", width=2),
                 fill="tozeroy",
                 fillcolor="rgba(238, 150, 75, 0.18)",
@@ -604,14 +763,12 @@ def _add_sti_heatmap_panel(
     fig: go.Figure,
     time_axis: np.ndarray,
     sti_matrix: np.ndarray,
-    color_title: str,
-    color_scale: list[list[float]],
     scales: DisplayScales,
 ) -> None:
-    """Add the STI heatmap used by the live dashboard."""
+    """Add the CSI-STI heatmap used by the live dashboard."""
     if sti_matrix.size == 0:
         fig.add_annotation(
-            text="Waiting for enough CSI frames to build STI",
+            text="等待更多連續 CSI 幀建立 CSI-STI",
             x=0.725,
             y=0.19,
             xref="paper",
@@ -626,17 +783,58 @@ def _add_sti_heatmap_panel(
             x=time_axis,
             y=SIGNED_SUBCARRIERS,
             z=sti_matrix,
-            colorscale=color_scale,
+            colorscale=SPECTROGRAM_COLORSCALE,
             zmin=0.0,
-            zmax=scales.spectrogram_z_max,
+            zmax=scales.sti_z_max,
             zsmooth="best",
-            showscale=False,
+            colorbar=_bottom_right_colorbar(fig, "CSI-STI"),
             hovertemplate=(
-                "Time %{x:.2f}s<br>"
-                "Subcarrier %{y}<br>"
-                "Value %{z:.3f}<extra></extra>"
+                "時間 %{x:.2f}s<br>"
+                "子載波 %{y}<br>"
+                "STI 變化 %{z:.3f}<extra></extra>"
             ),
-            name="STI Heatmap",
+            name="CSI-STI Heatmap",
+        ),
+        row=2,
+        col=2,
+    )
+
+
+def _add_posture_heatmap_panel(
+    fig: go.Figure,
+    time_axis: np.ndarray,
+    posture_matrix: np.ndarray,
+    scales: DisplayScales,
+) -> None:
+    """Add the baseline-relative hand posture fingerprint heatmap."""
+    if posture_matrix.size == 0:
+        fig.add_annotation(
+            text="等待基線與手勢 CSI 幀建立姿勢指紋",
+            x=0.725,
+            y=0.19,
+            xref="paper",
+            yref="paper",
+            showarrow=False,
+            font=dict(size=12, color="#6f859b"),
+        )
+        return
+
+    fig.add_trace(
+        go.Heatmap(
+            x=time_axis,
+            y=SIGNED_SUBCARRIERS,
+            z=posture_matrix,
+            colorscale=POSTURE_COLORSCALE,
+            zmin=-scales.posture_z_max,
+            zmax=scales.posture_z_max,
+            zsmooth="best",
+            colorbar=_bottom_right_colorbar(fig, "手勢差分"),
+            hovertemplate=(
+                "時間 %{x:.2f}s<br>"
+                "子載波 %{y}<br>"
+                "相對基線 %{z:.4f}<extra></extra>"
+            ),
+            name="手勢姿勢指紋",
         ),
         row=2,
         col=2,
@@ -833,14 +1031,14 @@ def build_figure(
 
 def build_empty_sti_figure(message: str, scales: DisplayScales) -> go.Figure:
     """Build an empty placeholder figure that matches the STI layout."""
-    fig = _make_subplot_figure(("3D CSI Point Cloud", "Subcarrier Profile", "STI Heatmap"))
+    fig = _make_subplot_figure(("3D CSI 姿勢雲霧圖", "穩定手勢指紋", "手勢姿勢熱圖"))
     fig.update_layout(
         **LAYOUT_COMMON,
         height=scales.figure_height,
         title=dict(text=message, x=0.5, xanchor="center"),
     )
     fig.add_annotation(
-        text="Waiting for CSI frames...",
+        text="等待 CSI 幀資料...",
         x=0.47,
         y=0.76,
         xref="paper",
@@ -849,7 +1047,7 @@ def build_empty_sti_figure(message: str, scales: DisplayScales) -> go.Figure:
         font=dict(size=18, color="#8aa0b7"),
     )
     fig.add_annotation(
-        text="Bottom-left panel shows baseline, live profile, delta and silhouette.",
+        text="左下會顯示基線、目前場景、差分與輪廓代理。",
         x=0.215,
         y=0.19,
         xref="paper",
@@ -858,7 +1056,7 @@ def build_empty_sti_figure(message: str, scales: DisplayScales) -> go.Figure:
         font=dict(size=12, color="#6f859b"),
     )
     fig.add_annotation(
-        text="Bottom-right panel switches to STI instead of Doppler/STFT.",
+        text="右下會顯示目前手勢相對空場基線的穩定差分。",
         x=0.725,
         y=0.19,
         xref="paper",
@@ -875,18 +1073,25 @@ def build_sti_figure(
     max_time_frames: int,
     scales: DisplayScales,
 ) -> go.Figure:
-    """Build the live figure with an STI heatmap instead of the Doppler panel."""
+    """Build the live figure with a hand-posture fingerprint heatmap."""
     frames = csi_source.get_latest_frames(max_time_frames)
     snapshot = csi_source.get_scene_snapshot()
 
     if len(frames) < 2:
-        return build_empty_sti_figure("Waiting for CSI frames...", scales)
+        return build_empty_sti_figure("等待 CSI 幀資料...", scales)
 
     time_axis, amplitude_matrix = _prepare_frame_arrays(frames)
     display_matrix, color_title, color_scale = _compute_display_matrix(amplitude_matrix, snapshot)
-    sti_matrix = _compute_sti_matrix(display_matrix)
+    (
+        posture_matrix,
+        hold_profile,
+        hold_delta_profile,
+        posture_score,
+        active_ratio,
+        posture_stability,
+    ) = _compute_posture_fingerprint(amplitude_matrix, snapshot)
 
-    fig = _make_subplot_figure(("3D CSI Point Cloud", "Subcarrier Profile", "STI Heatmap"))
+    fig = _make_subplot_figure(("3D CSI 姿勢雲霧圖", "穩定手勢指紋", "手勢姿勢熱圖"))
 
     _add_cloud_panel(
         fig,
@@ -898,15 +1103,15 @@ def build_sti_figure(
         snapshot,
         scales,
     )
-    _add_profile_panel(fig, snapshot)
-    _add_sti_heatmap_panel(fig, time_axis, sti_matrix, color_title, color_scale, scales)
+    _add_profile_panel(fig, snapshot, hold_profile=hold_profile, hold_delta_profile=hold_delta_profile)
+    _add_posture_heatmap_panel(fig, time_axis, posture_matrix, scales)
 
     latest_frame = frames[-1]
-    status_text, status_color = _build_status(snapshot, detector)
     metric_text = (
         f"RSSI {latest_frame.rssi_dbm:.0f} dBm | "
-        f"差分均值 {snapshot.motion_energy:.3f} | "
-        f"輪廓覆蓋 {snapshot.foreground_ratio:.0%} | "
+        f"手勢分數 {posture_score:.3f} | "
+        f"穩定度 {posture_stability:.3f} | "
+        f"活躍子載波 {active_ratio:.0%} | "
         f"最大差分 {snapshot.peak_delta:.3f}"
     )
 
@@ -933,7 +1138,7 @@ def build_sti_figure(
 
     fig.update_scenes(
         xaxis=dict(
-            title="Signed subcarrier",
+            title="Signed 子載波",
             backgroundcolor="#0b1626",
             gridcolor="#203247",
             showbackground=True,
@@ -942,14 +1147,14 @@ def build_sti_figure(
             range=[-27, 27],
         ),
         yaxis=dict(
-            title="Time (s)",
+            title="時間 (秒)",
             backgroundcolor="#0b1626",
             gridcolor="#203247",
             showbackground=True,
             range=[0.0, max_time],
         ),
         zaxis=dict(
-            title="Amplitude",
+            title="振幅",
             backgroundcolor="#0b1626",
             gridcolor="#203247",
             showbackground=True,
@@ -961,7 +1166,7 @@ def build_sti_figure(
     )
 
     fig.update_xaxes(
-        title_text="Signed subcarrier",
+        title_text="Signed 子載波",
         tickmode="array",
         tickvals=SUBCARRIER_TICKS,
         gridcolor="#203247",
@@ -970,7 +1175,7 @@ def build_sti_figure(
         col=1,
     )
     fig.update_yaxes(
-        title_text="Amplitude",
+        title_text="振幅",
         gridcolor="#203247",
         zerolinecolor="#203247",
         range=[0, scales.profile_y_max],
@@ -979,7 +1184,7 @@ def build_sti_figure(
         secondary_y=False,
     )
     fig.update_yaxes(
-        title_text="Delta / silhouette",
+        title_text="差分 / 輪廓",
         gridcolor="#203247",
         zerolinecolor="#203247",
         range=[0, scales.delta_y_max],
@@ -988,7 +1193,7 @@ def build_sti_figure(
         secondary_y=True,
     )
     fig.update_xaxes(
-        title_text="Time (s)",
+        title_text="時間 (秒)",
         gridcolor="#203247",
         zerolinecolor="#203247",
         range=[0.0, max_time],
@@ -996,7 +1201,7 @@ def build_sti_figure(
         col=2,
     )
     fig.update_yaxes(
-        title_text="Signed subcarrier",
+        title_text="Signed 子載波",
         tickmode="array",
         tickvals=SUBCARRIER_TICKS,
         gridcolor="#203247",
@@ -1041,11 +1246,13 @@ class CSI3DDisplay:
 
         _, amplitude_matrix = _prepare_frame_arrays(frames)
         display_matrix, _, _ = _compute_display_matrix(amplitude_matrix, snapshot)
+        posture_matrix, _, _, _, _, _ = _compute_posture_fingerprint(amplitude_matrix, snapshot)
 
-        cloud_target, profile_target, delta_target, spectrogram_target = _estimate_targets(
+        cloud_target, profile_target, delta_target, cloud_color_target, posture_target = _estimate_targets(
             amplitude_matrix,
             display_matrix,
             snapshot,
+            posture_matrix,
         )
 
         self._scales.cloud_z_max = _smooth_scale(
@@ -1063,10 +1270,15 @@ class CSI3DDisplay:
             delta_target,
             DEFAULT_DELTA_Y_MAX,
         )
-        self._scales.spectrogram_z_max = _smooth_scale(
-            self._scales.spectrogram_z_max,
-            spectrogram_target,
-            DEFAULT_SPECTROGRAM_Z_MAX,
+        self._scales.cloud_color_max = _smooth_scale(
+            self._scales.cloud_color_max,
+            cloud_color_target,
+            DEFAULT_CLOUD_COLOR_MAX,
+        )
+        self._scales.posture_z_max = _smooth_scale(
+            self._scales.posture_z_max,
+            posture_target,
+            DEFAULT_POSTURE_Z_MAX,
         )
 
     def _build_current_figure(self) -> go.Figure:
@@ -1337,11 +1549,11 @@ class CSI3DDisplay:
 <body>
     <div class="header">
         <h1>ESP32 CSI 三圖視覺化</h1>
-        <p>左：3D 差分雲霧圖｜右上：子載波變化圖｜右下：STFT Spectrogram｜每 {refresh_seconds} 秒自動刷新</p>
+        <p>左：3D 差分雲霧圖｜右上：手勢平均指紋｜右下：手勢姿勢熱圖｜每 {refresh_seconds} 秒自動刷新</p>
     </div>
     <div class="content">{figure_html}</div>
     <div class="footer">
-        HTML body margin 已設為 0，並固定 figure 高度。右下為真正的 STFT 頻譜圖。
+        HTML body margin 已設為 0，並固定 figure 高度。右下為目前手勢相對空場基線的姿勢指紋。
     </div>
 </body>
 </html>"""
@@ -1384,6 +1596,9 @@ def _initialize_log_file(display: CSI3DDisplay) -> None:
                     "motion_energy",
                     "foreground_ratio",
                     "peak_delta",
+                    "posture_score",
+                    "posture_stability",
+                    "active_subcarrier_ratio",
                 ]
             )
 
@@ -1398,6 +1613,9 @@ def _append_refresh_log(
     motion_state: str,
     status_text: str,
     snapshot: SceneSnapshot,
+    posture_score: float,
+    posture_stability: float,
+    active_subcarrier_ratio: float,
 ) -> None:
     """Append one dashboard refresh snapshot to the CSV log."""
     with display._log_lock:
@@ -1419,6 +1637,9 @@ def _append_refresh_log(
                     f"{snapshot.motion_energy:.6f}",
                     f"{snapshot.foreground_ratio:.6f}",
                     f"{snapshot.peak_delta:.6f}",
+                    f"{posture_score:.6f}",
+                    f"{posture_stability:.6f}",
+                    f"{active_subcarrier_ratio:.6f}",
                 ]
             )
 
@@ -1428,7 +1649,26 @@ def _build_live_payload(display: CSI3DDisplay, n_intervals: int) -> dict:
     figure = display._build_current_figure()
     frames = display.csi_source.get_latest_frames(display.max_time_frames)
     snapshot = display.csi_source.get_scene_snapshot()
-    status_text, status_color = _build_status(snapshot, display.detector)
+    posture_score = 0.0
+    posture_stability = 0.0
+    active_subcarrier_ratio = 0.0
+    if len(frames) >= 2:
+        _, amplitude_matrix = _prepare_frame_arrays(frames)
+        (
+            _posture_matrix,
+            _hold_profile,
+            _hold_delta_profile,
+            posture_score,
+            active_subcarrier_ratio,
+            posture_stability,
+        ) = _compute_posture_fingerprint(amplitude_matrix, snapshot)
+    status_text, status_color = _build_status(
+        snapshot,
+        display.detector,
+        posture_score=posture_score,
+        posture_stability=posture_stability,
+        active_subcarrier_ratio=active_subcarrier_ratio,
+    )
     latest_frame = frames[-1] if frames else None
     time_window_seconds = frames[-1].timestamp - frames[0].timestamp if len(frames) >= 2 else 0.0
     latest_frame_timestamp = (
@@ -1440,6 +1680,9 @@ def _build_live_payload(display: CSI3DDisplay, n_intervals: int) -> dict:
     motion_state = getattr(display.detector.state, "name", str(display.detector.state))
     update_info = (
         f"Refresh #{n_intervals} | Interval {display.update_interval_ms} ms | "
+        f"gesture score {posture_score:.3f} | "
+        f"stability {posture_stability:.3f} | "
+        f"active subcarriers {active_subcarrier_ratio:.0%} | "
         f"Figure height {display._scales.figure_height}px"
     )
     _append_refresh_log(
@@ -1452,6 +1695,9 @@ def _build_live_payload(display: CSI3DDisplay, n_intervals: int) -> dict:
         motion_state=motion_state,
         status_text=status_text,
         snapshot=snapshot,
+        posture_score=posture_score,
+        posture_stability=posture_stability,
+        active_subcarrier_ratio=active_subcarrier_ratio,
     )
     return {
         "figure": figure.to_plotly_json(),

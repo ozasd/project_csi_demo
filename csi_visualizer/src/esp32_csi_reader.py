@@ -106,10 +106,10 @@ class ESP32CSISource:
         port: str = "COM3",
         baudrate: int = 921600,
         baseline_frames: int = 80,
-        smoothing_window: int = 4,
-        scene_window: int = 12,
-        contour_sigma: float = 2.2,
-        contour_floor: float = 0.04,
+        smoothing_window: int = 3,
+        scene_window: int = 6,
+        contour_sigma: float = 1.6,
+        contour_floor: float = 0.018,
     ):
         self.port = port
         self.baudrate = baudrate
